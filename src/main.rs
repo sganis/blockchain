@@ -108,21 +108,21 @@ fn main() -> Result<()> {
     //let mut file_number = 976;
 
     // create files with headers
-    let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
-    let mut blk_w = BufWriter::new(f);
-    writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE,TX_COUNT")?;
+    // let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
+    // let mut blk_w = BufWriter::new(f);
+    // writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE,TX_COUNT")?;
 
-    let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
-    let mut tx_w = BufWriter::new(f);
-    writeln!(tx_w, "BLOCK,TXID,INP_COUNT,OUT_COUNT")?;
+    // let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
+    // let mut tx_w = BufWriter::new(f);
+    // writeln!(tx_w, "BLOCK,TXID,INP_COUNT,OUT_COUNT")?;
     
-    let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
-    let mut txi_w = BufWriter::new(f);
-    writeln!(txi_w, "TXID,TIN,VOUT,SCRIPT")?;
+    // let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
+    // let mut txi_w = BufWriter::new(f);
+    // writeln!(txi_w, "TXID,TIN,VOUT,SCRIPT")?;
 
-    let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
-    let mut txo_w = BufWriter::new(f);
-    writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
+    // let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
+    // let mut txo_w = BufWriter::new(f);
+    // writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
 
     let mut debug = false;
 
@@ -130,7 +130,8 @@ fn main() -> Result<()> {
         if file_number != 3 {
             continue;
         }
-        let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
+        //let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
+        let reader = File::open("data/blk00003.dat")?;
         let mut reader = BufReader::new(reader);
 
         loop {       
@@ -139,9 +140,9 @@ fn main() -> Result<()> {
                 break;
             }
             //println!("\nBLOCK NUMBER: {}", block_number);
-            if block_number == 5356 {
-                debug = true;
-            }
+            // if block_number == 5356 {
+            //     debug = true;
+            // }
             let magic = u32::from_le_bytes(b4[..4].try_into()?);
             assert!(magic == MAGIC, "Wrong magic number");    
             reader.read_exact(&mut b4)?;
@@ -182,21 +183,24 @@ fn main() -> Result<()> {
             let header = Header {version, prev_hash, merkle_root, time, bits, nonce};
             
             let tx_count = read_varint(&mut reader)?;
-            //println!("Transactions: {}", tx_count.value());
-            
-            writeln!(blk_w, "{},{},{},{},{},{},{},{},{},{}", 
-                file_number, block_number, date_str, time_str,
-                hex::encode(version), 
-                hex::encode(prev_hash), 
-                hex::encode(merkle_root), 
-                hex::encode(bits), 
-                hex::encode(nonce),
-                tx_count.value()
-            )?;
+            if debug {
+                println!("Transactions: {}", tx_count.value());
+            }
+            // writeln!(blk_w, "{},{},{},{},{},{},{},{},{},{}", 
+            //     file_number, block_number, date_str, time_str,
+            //     hex::encode(version), 
+            //     hex::encode(prev_hash), 
+            //     hex::encode(merkle_root), 
+            //     hex::encode(bits), 
+            //     hex::encode(nonce),
+            //     tx_count.value()
+            // )?;
             
             // tx
             for tx in 0..tx_count.value() {
-                //println!(" Transaction: {}", (tx + 1));
+                if debug {
+                    println!(" Transaction: {}", (tx + 1));
+                }
                 let mut tx_data = Vec::new();
 
                 // version
@@ -227,8 +231,9 @@ fn main() -> Result<()> {
                     reader.read_exact(&mut b32)?;
                     tx_data.extend_from_slice(&b32);                
                     let txid = hex::encode(&b32);
-                    //println!("  txid     : {}", txid);
-
+                    if debug {
+                        println!("  txid     : {}", txid);
+                    }
                     // prev txout index
                     reader.read_exact(&mut b4)?;
                     tx_data.extend_from_slice(&b4);
@@ -265,12 +270,13 @@ fn main() -> Result<()> {
                 //println!(" Outputs    : {}", out_count.value());
 
                 // output
-                for _ in 0..out_count.value() {
+                for i in 0..out_count.value() {
                     // value
                     reader.read_exact(&mut b8)?;
                     tx_data.extend_from_slice(&b8);
-                    //println!("  Sat value : {}", u64::from_le_bytes(b8[..8].try_into()?));
-
+                    if debug {
+                        println!("  Output {}/{}: Sat value : {}", i+1, out_count.value(), u64::from_le_bytes(b8[..8].try_into()?));
+                    }
                     // tx in script len
                     let script_len = read_varint(&mut reader)?;
                     tx_data.extend_from_slice(&script_len.data()[..script_len.len() as usize]);
@@ -313,8 +319,11 @@ fn main() -> Result<()> {
                 tx_data.extend_from_slice(&b4);
                 let txid = hash::compute_txid(&tx_data[..]);
                 let txid_str = hex::encode(&txid[..]);
-                // println!("txid: {}", hex::encode(&txid[..]));
-                writeln!(tx_w, "{},{},{},{}",block_number, txid_str, in_count.value(), out_count.value())?;
+                if debug {
+                    println!("txid: {}", hex::encode(&txid[..]));
+                    //assert!("50cfd3361f7162b3c0c00dacd3d0e4ddf61e8ec0c51bfa54c4ca0e61876810a9"==hex::encode(&txid[..]));
+                }
+                // writeln!(tx_w, "{},{},{},{}",block_number, txid_str, in_count.value(), out_count.value())?;
             
             }   
 

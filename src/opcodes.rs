@@ -8,13 +8,15 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
         let opcode = match byte {
             0x00 => "0".to_string(),
             0x01..=0x4b => {
-                let data_len = byte as usize;
-                if debug {
-                    println!("index={}, data_len={} script_len={}",index, data_len, script.len());
+                let mut data_len = byte as usize;
+                if index + 1 + data_len <= script.len() {
+                    let data = &script[(index + 1)..(index + 1 + data_len)];
+                    index += data_len;
+                    format!("PUSHBYTES_{} {}", byte, hex::encode(&data))
+                } else {
+                    index += data_len;
+                    format!("PUSHBYTES_{} <overflow>", byte)
                 }
-                let data = &script[(index + 1)..(index + 1 + data_len)];
-                index += data_len;
-                format!("PUSHBYTES_{} {}", byte, hex::encode(&data))
             },
             0x4c => {
                 let data_len = script[index + 1] as usize;
@@ -106,7 +108,7 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
             //0x98 => "LSHIFT".to_string(),            
             //0x99 => "RSHIFT".to_string(),            
             0x9a => "BOOLAND".to_string(),            
-            0x9b => "BOOOR".to_string(),            
+            0x9b => "BOOLOR".to_string(),            
             0x9c => "NUMEQUAL".to_string(),            
             0x9d => "NUMEQUALVERIFY".to_string(),            
             0x9e => "NUMNOTEQUAL".to_string(),            
