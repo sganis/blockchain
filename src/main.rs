@@ -124,7 +124,12 @@ fn main() -> Result<()> {
     let mut txo_w = BufWriter::new(f);
     writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
 
+    let mut debug = false;
+
     for file_number in 0..4586 {
+        if file_number != 3 {
+            continue;
+        }
         let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
         let mut reader = BufReader::new(reader);
 
@@ -133,9 +138,10 @@ fn main() -> Result<()> {
                 println!("eof for file {}", file_number);
                 break;
             }
-
             //println!("\nBLOCK NUMBER: {}", block_number);
-
+            if block_number == 5356 {
+                debug = true;
+            }
             let magic = u32::from_le_bytes(b4[..4].try_into()?);
             assert!(magic == MAGIC, "Wrong magic number");    
             reader.read_exact(&mut b4)?;
@@ -237,10 +243,13 @@ fn main() -> Result<()> {
                     let mut script_sig = vec![0u8; in_script_len.value() as usize];
                     reader.read_exact(&mut script_sig)?;
                     tx_data.extend_from_slice(&script_sig[..script_sig.len() as usize]);
-                    //println!("  script_sig: {}", hex::encode(&script_sig));
-                    let opcode = script_to_opcodes(&script_sig);
-                    println!("  script_sig: {}", opcode);
-
+                    if debug {
+                        println!("  script_sig hex: {}", hex::encode(&script_sig));
+                    }
+                    let opcode = script_to_opcodes(&script_sig, debug);
+                    if debug {
+                        println!("  script_sig: {}", opcode);
+                    }
                     // sequence
                     reader.read_exact(&mut b4)?;
                     tx_data.extend_from_slice(&b4);
@@ -272,9 +281,13 @@ fn main() -> Result<()> {
                         let mut script_pky = vec![0u8; script_len.value() as usize];
                         reader.read_exact(&mut script_pky)?;
                         tx_data.extend_from_slice(&script_pky[..script_pky.len() as usize]);
-                        //println!("  script_pub: {}", hex::encode(&script_pky));
-                        let opcode = script_to_opcodes(&script_pky);
-                        println!("  script_pub: {}", opcode);
+                        if debug {
+                            println!("  script_pub hex: {}", hex::encode(&script_pky));
+                        }
+                        let opcode = script_to_opcodes(&script_pky, debug);
+                        if debug {
+                            println!("  script_pub: {}", opcode);
+                        }
                     }
                     //writeln!(txo_w, "{},{},{}", txid, vout, opcode)?;
 

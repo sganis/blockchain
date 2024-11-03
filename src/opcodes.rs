@@ -1,50 +1,53 @@
-pub fn script_to_opcodes(script_bytes: &[u8]) -> String {
+pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
     let mut opcodes = Vec::new();
     let mut index = 0;
 
-    while index < script_bytes.len() {
-        let opcode_byte = script_bytes[index];
+    while index < script.len() {
+        let byte = script[index];
         
-        let opcode = match opcode_byte {
+        let opcode = match byte {
             0x00 => "0".to_string(),
             0x01..=0x4b => {
-                let data_len = opcode_byte as usize;
-                let data = &script_bytes[(index + 1)..(index + 1 + data_len)];
+                let data_len = byte as usize;
+                if debug {
+                    println!("index={}, data_len={} script_len={}",index, data_len, script.len());
+                }
+                let data = &script[(index + 1)..(index + 1 + data_len)];
                 index += data_len;
-                format!("PUSHBYTES_{} {}", opcode_byte, hex::encode(&data))
+                format!("PUSHBYTES_{} {}", byte, hex::encode(&data))
             },
             0x4c => {
-                let data_len = script_bytes[index + 1] as usize;
+                let data_len = script[index + 1] as usize;
                 index += 1;
-                let data = &script_bytes[(index + 1)..(index + 1 + data_len)];
+                let data = &script[(index + 1)..(index + 1 + data_len)];
                 index += data_len;
                 format!("PUSHDATA1 {} {}", data_len, hex::encode(data))
             }
             0x4d => {
                 let data_len = u16::from_le_bytes([
-                    script_bytes[index + 1], 
-                    script_bytes[index + 2]
+                    script[index + 1], 
+                    script[index + 2]
                 ]) as usize;
                 index += 2;
-                let data = &script_bytes[(index + 1)..(index + 1 + data_len)];
+                let data = &script[(index + 1)..(index + 1 + data_len)];
                 index += data_len;
                 format!("PUSHDATA2 {} {}", data_len, hex::encode(data))
             }
             0x4e => {
                 let data_len = u32::from_le_bytes([
-                    script_bytes[index + 1],
-                    script_bytes[index + 2],
-                    script_bytes[index + 3],
-                    script_bytes[index + 4],
+                    script[index + 1],
+                    script[index + 2],
+                    script[index + 3],
+                    script[index + 4],
                 ]) as usize;
                 index += 4;
-                let data = &script_bytes[(index + 1)..(index + 1 + data_len)];
+                let data = &script[(index + 1)..(index + 1 + data_len)];
                 index += data_len;
                 format!("PUSHDATA4 {} {}", data_len, hex::encode(data))
             }
             0x4f => "1NEGATE".to_string(),
             0x50 => "RESERVED".to_string(),
-            0x51..=0x60 => format!("{}", opcode_byte - 0x50),
+            0x51..=0x60 => format!("{}", byte - 0x50),
             0x61 => "NOP".to_string(),
             0x62 => "VER".to_string(),
             0x63 => "IF".to_string(),
@@ -135,9 +138,9 @@ pub fn script_to_opcodes(script_bytes: &[u8]) -> String {
             0xb8 => "NOP9".to_string(),
             0xb9 => "NOP10".to_string(),
             0xba => "CHECKSIGADD".to_string(),
-            0xbb..=0xfe => format!("RETURN_{}", opcode_byte),
+            0xbb..=0xfe => format!("RETURN_{}", byte),
             0xff => "INVALIDOPCODE".to_string(),            
-            _ => format!("UNKNOWN({})", opcode_byte),
+            _ => format!("UNKNOWN({})", byte),
         };
         //println!("{}", opcode.to_string());
         opcodes.push(opcode.to_string());        
@@ -153,8 +156,8 @@ mod tests {
     
     //#[test]
     fn test_script_to_optcodes() {
-        let script_bytes: [u8; 9] = [0x4c, 0x05, 0x31, 0x32, 0x33, 0x34, 0x35, 0x6a, 0x67];
-        let opcodes = script_to_opcodes(&script_bytes);
+        let script: [u8; 9] = [0x4c, 0x05, 0x31, 0x32, 0x33, 0x34, 0x35, 0x6a, 0x67];
+        let opcodes = script_to_opcodes(&script);
         assert_eq!(opcodes, "PUSHDATA(3132333435) RETURN ELSE".to_string());
         println!("{}",opcodes);
     }
