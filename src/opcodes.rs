@@ -142,7 +142,9 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
             0xff => "INVALIDOPCODE".to_string(),            
             _ => format!("UNKNOWN({})", byte),
         };
-        //println!("{}", opcode.to_string());
+        if debug {
+            println!("{}", opcode.to_string());
+        }
         opcodes.push(opcode.to_string());        
         index += 1;
     }
