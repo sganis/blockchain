@@ -2,6 +2,7 @@ mod opcodes;
 mod hash;
 use anyhow::Result;
 use hex;
+use sha2::{Sha256, Digest};
 use chrono::prelude::{TimeZone, Utc};
 use std::{
     fs::File, 
@@ -35,7 +36,7 @@ fn read_varint<T: Read>(reader: &mut BufReader<T>) -> Result<VarInt> {
     reader.read_exact(&mut b1)?;
     let number = u8::from_le_bytes(b1[..].try_into()?) as u64;
     let mut data = [0u8; 9];
-    data[..1].copy_from_slice(&b1[..]);
+    data[0] = b1[0];
 
     let varint = match number {
         253 => {
@@ -51,12 +52,13 @@ fn read_varint<T: Read>(reader: &mut BufReader<T>) -> Result<VarInt> {
         255 => {
             reader.read_exact(&mut b8)?;
             data[1..9].copy_from_slice(&b8[..]);
-            VarInt(u64::from_le_bytes(b8[..8].try_into()?), 8, data)
+            VarInt(u64::from_le_bytes(b8[..8].try_into()?), 9, data)
         },
         _ => {
             VarInt(number, 1, data)
         }
     };
+    println!("VarInt: {} {} {:?}", varint.value(), varint.len(), varint.data());
     Ok(varint)
 }
 struct Header {
@@ -127,11 +129,11 @@ fn main() -> Result<()> {
     let mut debug = false;
 
     for file_number in 0..4586 {
-        if file_number != 3 {
-            continue;
-        }
+        // if file_number != 3 {
+        //     continue;
+        // }
         //let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
-        let reader = File::open("data/blk00003.dat")?;
+        let reader = File::open("data/blk00000.dat")?;
         let mut reader = BufReader::new(reader);
 
         loop {       
@@ -151,21 +153,21 @@ fn main() -> Result<()> {
             // block
             // version
             reader.read_exact(&mut b4)?;
-            let version = b4[..4].try_into()?;
-            let version_int = u32::from_le_bytes(b4[..4].try_into()?);
+            let version = b4[..].try_into()?;
+            let version_int = u32::from_le_bytes(b4[..].try_into()?);
             
             // previous block hash
             reader.read_exact(&mut b32)?;
-            let prev_hash = b32[..32].try_into()?;
+            let prev_hash = b32[..].try_into()?;
             
             // merkle root
             reader.read_exact(&mut b32)?;
-            let merkle_root = b32[..32].try_into()?;
+            let merkle_root = b32[..].try_into()?;
             
             // time
             reader.read_exact(&mut b4)?;
             let time = b4[..4].try_into()?;
-            let timestamp = u32::from_le_bytes(b4[..4].try_into()?) as i64;
+            let timestamp = u32::from_le_bytes(b4[..].try_into()?) as i64;
             let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
             let date_str = datetime.format("%Y-%m-%d");
             let time_str = datetime.format("%H:%M:%S");            
@@ -197,22 +199,23 @@ fn main() -> Result<()> {
             // )?;
             
             // tx
-            for tx in 0..tx_count.value() {
+            for t in 0..tx_count.value() {
                 if debug {
-                    println!(" Transaction: {}", (tx + 1));
+                    println!(" Transaction: {}", (t + 1));
                 }
-                let mut tx_data = Vec::new();
+
+                let mut hasher = Sha256::new();
 
                 // version
                 reader.read_exact(&mut b4)?;
-                tx_data.extend_from_slice(&b4);
-                let version = u32::from_le_bytes(b4[..4].try_into()?);                
+                hasher.update(&b4);
+                let version = u32::from_le_bytes(b4[..].try_into()?);                
                 assert_eq!(version, 1);
                 //println!("version     : {}", hex::encode(&b4));
 
                 // optional flag 0001 2 bytes or varint with num of inputs
                 let mut in_count = read_varint(&mut reader)?;
-                //println!(" Inputs     : {}", in_count.value());
+                println!(" Inputs     : {}", in_count.value());
                 
                 let mut has_witness = false;
 
@@ -221,33 +224,34 @@ fn main() -> Result<()> {
                     reader.read_exact(&mut b1)?;
                     assert_eq!(hex::encode(&b1), "01");
                     in_count = read_varint(&mut reader)?;
-                    //println!("segwit flag, in_counter: {}", in_counter.value());
+                    println!("segwit flag, in_counter: {}", in_count.value());
+                    return Ok(());
                 } 
-                tx_data.extend_from_slice(&in_count.data()[..in_count.len() as usize]);
+                hasher.update(&in_count.data()[..in_count.len() as usize]);
                 
                 // input
                 for _ in 0..in_count.value() {
                     // prev tx hash
                     reader.read_exact(&mut b32)?;
-                    tx_data.extend_from_slice(&b32);                
+                    hasher.update(&b32);                
                     let txid = hex::encode(&b32);
                     if debug {
                         println!("  txid     : {}", txid);
                     }
                     // prev txout index
                     reader.read_exact(&mut b4)?;
-                    tx_data.extend_from_slice(&b4);
+                    hasher.update(&b4);
                     let vout = u32::from_le_bytes(b4[..4].try_into()?); 
                     //println!("  vout: {}", hex::encode(&b4));
                     
                     // tx in script len
                     let in_script_len = read_varint(&mut reader)?;
-                    tx_data.extend_from_slice(&in_script_len.data()[..in_script_len.len() as usize]);
+                    hasher.update(&in_script_len.data()[..in_script_len.len() as usize]);
                     //println!("  script_len: {}", in_script_len.value());
                     // scriptsig
                     let mut script_sig = vec![0u8; in_script_len.value() as usize];
                     reader.read_exact(&mut script_sig)?;
-                    tx_data.extend_from_slice(&script_sig[..script_sig.len() as usize]);
+                    hasher.update(&script_sig[..script_sig.len() as usize]);
                     if debug {
                         println!("  script_sig hex: {}", hex::encode(&script_sig));
                     }
@@ -257,7 +261,7 @@ fn main() -> Result<()> {
                     }
                     // sequence
                     reader.read_exact(&mut b4)?;
-                    tx_data.extend_from_slice(&b4);
+                    hasher.update(&b4);
                     //println!("  sequence nr : {}", hex::encode(&b4));
 
                     //writeln!(txi_w, "{},{},{}", txid, vout, opcode)?;
@@ -266,27 +270,27 @@ fn main() -> Result<()> {
 
                 // out-counter
                 let out_count = read_varint(&mut reader)?;
-                tx_data.extend_from_slice(&out_count.data()[..out_count.len() as usize]);
+                hasher.update(&out_count.data()[..out_count.len() as usize]);
                 //println!(" Outputs    : {}", out_count.value());
 
                 // output
                 for i in 0..out_count.value() {
-                    // value
+                    // sat value
                     reader.read_exact(&mut b8)?;
-                    tx_data.extend_from_slice(&b8);
+                    hasher.update(&b8);
                     if debug {
                         println!("  Output {}/{}: Sat value : {}", i+1, out_count.value(), u64::from_le_bytes(b8[..8].try_into()?));
                     }
                     // tx in script len
                     let script_len = read_varint(&mut reader)?;
-                    tx_data.extend_from_slice(&script_len.data()[..script_len.len() as usize]);
+                    hasher.update(&script_len.data()[..script_len.len() as usize]);
                     //println!("  script_len: {}", script_len.value());
                     
                     // scriptpk
                     if script_len.value() > 0 {
                         let mut script_pky = vec![0u8; script_len.value() as usize];
                         reader.read_exact(&mut script_pky)?;
-                        tx_data.extend_from_slice(&script_pky[..script_pky.len() as usize]);
+                        hasher.update(&script_pky[..script_pky.len() as usize]);
                         if debug {
                             println!("  script_pub hex: {}", hex::encode(&script_pky));
                         }
@@ -316,12 +320,16 @@ fn main() -> Result<()> {
                 // lock time
                 reader.read_exact(&mut b4)?;
                 //println!("lock_time : {}", hex::encode(&b4));
-                tx_data.extend_from_slice(&b4);
-                let txid = hash::compute_txid(&tx_data[..]);
-                let txid_str = hex::encode(&txid[..]);
-                if debug {
-                    println!("txid: {}", hex::encode(&txid[..]));
-                    //assert!("50cfd3361f7162b3c0c00dacd3d0e4ddf61e8ec0c51bfa54c4ca0e61876810a9"==hex::encode(&txid[..]));
+                hasher.update(&b4);
+                let hash = hasher.finalize();
+                let txid = Sha256::digest(&hash);
+                let rev = hash::reverse(&txid);
+
+                if t == 0 {
+                    let tx_hex = hex::encode(&rev);
+                    println!("txid: {}", tx_hex);
+                    assert!("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"==&tx_hex);
+                    
                 }
                 // writeln!(tx_w, "{},{},{},{}",block_number, txid_str, in_count.value(), out_count.value())?;
             
@@ -334,6 +342,7 @@ fn main() -> Result<()> {
             block_number +=1;
 
         }
+        break;
     }
     
     Ok(())

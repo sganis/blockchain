@@ -161,7 +161,7 @@ mod tests {
     //#[test]
     fn test_script_to_optcodes() {
         let script: [u8; 9] = [0x4c, 0x05, 0x31, 0x32, 0x33, 0x34, 0x35, 0x6a, 0x67];
-        let opcodes = script_to_opcodes(&script);
+        let opcodes = script_to_opcodes(&script, false);
         assert_eq!(opcodes, "PUSHDATA(3132333435) RETURN ELSE".to_string());
         println!("{}",opcodes);
     }
@@ -170,7 +170,7 @@ mod tests {
     fn test_genesis_output() {
         let hex_string = "4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac";
         let bytes = hex::decode(hex_string).expect("Failed to decode hex string");        
-        let opcodes = script_to_opcodes(&bytes);
+        let opcodes = script_to_opcodes(&bytes, false);
         // assert_eq!(opcodes, "PUSHDATA(3132333435) RETURN ELSE".to_string());
         println!("{}",opcodes);
     }
@@ -179,7 +179,7 @@ mod tests {
     fn test_script_output() {
         let hex_string = "76a914cbc20a7664f2f69e5355aa427045bc15e7c6c77288ac";
         let bytes = hex::decode(hex_string).expect("Failed to decode hex string");        
-        let opcodes = script_to_opcodes(&bytes);
+        let opcodes = script_to_opcodes(&bytes, false);
         assert_eq!(opcodes, "DUP HASH160 <cbc20a7664f2f69e5355aa427045bc15e7c6c772> EQUALVERIFY CHECKSIG".to_string());
         println!("{}",opcodes);
     }
