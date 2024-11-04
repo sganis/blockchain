@@ -58,7 +58,7 @@ fn read_varint<T: Read>(reader: &mut BufReader<T>) -> Result<VarInt> {
             VarInt(number, 1, data)
         }
     };
-    println!("VarInt: {} {} {:?}", varint.value(), varint.len(), varint.data());
+    //println!("VarInt: {} {} {:?}", varint.value(), varint.len(), varint.data());
     Ok(varint)
 }
 struct Header {
@@ -110,30 +110,30 @@ fn main() -> Result<()> {
     //let mut file_number = 976;
 
     // create files with headers
-    // let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
-    // let mut blk_w = BufWriter::new(f);
-    // writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE,TX_COUNT")?;
+    let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
+    let mut blk_w = BufWriter::new(f);
+    writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE,TX_COUNT")?;
 
-    // let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
-    // let mut tx_w = BufWriter::new(f);
-    // writeln!(tx_w, "BLOCK,TXID,INP_COUNT,OUT_COUNT")?;
+    let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
+    let mut tx_w = BufWriter::new(f);
+    writeln!(tx_w, "BLOCK,TXID,INP_COUNT,OUT_COUNT")?;
     
-    // let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
-    // let mut txi_w = BufWriter::new(f);
-    // writeln!(txi_w, "TXID,TIN,VOUT,SCRIPT")?;
+    let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
+    let mut txi_w = BufWriter::new(f);
+    writeln!(txi_w, "TXID,TIN,VOUT,SCRIPT")?;
 
-    // let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
-    // let mut txo_w = BufWriter::new(f);
-    // writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
+    let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
+    let mut txo_w = BufWriter::new(f);
+    writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
 
     let mut debug = false;
 
     for file_number in 0..4586 {
-        // if file_number != 3 {
-        //     continue;
-        // }
-        //let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
-        let reader = File::open("data/blk00000.dat")?;
+        if file_number != 976 {
+            continue;
+        }
+        let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
+        //let reader = File::open("data/blk00000.dat")?;
         let mut reader = BufReader::new(reader);
 
         loop {       
@@ -210,12 +210,12 @@ fn main() -> Result<()> {
                 reader.read_exact(&mut b4)?;
                 hasher.update(&b4);
                 let version = u32::from_le_bytes(b4[..].try_into()?);                
-                assert_eq!(version, 1);
                 //println!("version     : {}", hex::encode(&b4));
-
+                //assert_eq!(version, 1);
+                
                 // optional flag 0001 2 bytes or varint with num of inputs
                 let mut in_count = read_varint(&mut reader)?;
-                println!(" Inputs     : {}", in_count.value());
+                if debug { println!(" Inputs     : {}", in_count.value());}
                 
                 let mut has_witness = false;
 
@@ -225,8 +225,9 @@ fn main() -> Result<()> {
                     assert_eq!(hex::encode(&b1), "01");
                     in_count = read_varint(&mut reader)?;
                     println!("segwit flag, in_counter: {}", in_count.value());
-                    return Ok(());
+                    //debug = true;                    
                 } 
+
                 hasher.update(&in_count.data()[..in_count.len() as usize]);
                 
                 // input
@@ -252,13 +253,9 @@ fn main() -> Result<()> {
                     let mut script_sig = vec![0u8; in_script_len.value() as usize];
                     reader.read_exact(&mut script_sig)?;
                     hasher.update(&script_sig[..script_sig.len() as usize]);
-                    if debug {
-                        println!("  script_sig hex: {}", hex::encode(&script_sig));
-                    }
+                    if debug { println!("  script_sig hex: {}", hex::encode(&script_sig));}
                     let opcode = script_to_opcodes(&script_sig, debug);
-                    if debug {
-                        println!("  script_sig: {}", opcode);
-                    }
+                    if debug { println!("  script_sig: {}", opcode);}
                     // sequence
                     reader.read_exact(&mut b4)?;
                     hasher.update(&b4);
@@ -322,16 +319,13 @@ fn main() -> Result<()> {
                 //println!("lock_time : {}", hex::encode(&b4));
                 hasher.update(&b4);
                 let hash = hasher.finalize();
-                let txid = Sha256::digest(&hash);
-                let rev = hash::reverse(&txid);
-
-                if t == 0 {
-                    let tx_hex = hex::encode(&rev);
-                    println!("txid: {}", tx_hex);
-                    assert!("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"==&tx_hex);
-                    
+                let txid = hex::encode(&hash::reverse(&Sha256::digest(&hash)));
+                if debug {
+                    println!("first sigwit txid: {}", txid);
+                    assert!("9c1ab453283035800c43eb6461eb46682b81be110a0cb89ee923882a5fd9daa4"==&txid);
+                    debug = false;
                 }
-                // writeln!(tx_w, "{},{},{},{}",block_number, txid_str, in_count.value(), out_count.value())?;
+                writeln!(tx_w, "{},{},{},{}",block_number, txid, in_count.value(), out_count.value())?;
             
             }   
 

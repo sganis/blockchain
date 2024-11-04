@@ -12,18 +12,23 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                 if index + 1 + data_len <= script.len() {
                     let data = &script[(index + 1)..(index + 1 + data_len)];
                     index += data_len;
-                    format!("PUSHBYTES_{} {}", byte, hex::encode(&data))
+                    format!("PUSHBYTES_{} {}", data_len, hex::encode(&data))
                 } else {
                     index += data_len;
-                    format!("PUSHBYTES_{} <overflow>", byte)
+                    format!("PUSHBYTES_{} <overflow>", data_len)
                 }
             },
             0x4c => {
                 let data_len = script[index + 1] as usize;
                 index += 1;
-                let data = &script[(index + 1)..(index + 1 + data_len)];
-                index += data_len;
-                format!("PUSHDATA1 {} {}", data_len, hex::encode(data))
+                if index + 1 + data_len <= script.len() {
+                    let data = &script[(index + 1)..(index + 1 + data_len)];
+                    index += data_len;
+                    format!("PUSHDATA1 {} {}", data_len, hex::encode(data))
+                } else {
+                    index += data_len;
+                    format!("PUSHBYTES_{} <overflow>", byte)
+                }
             }
             0x4d => {
                 let data_len = u16::from_le_bytes([
@@ -31,9 +36,14 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                     script[index + 2]
                 ]) as usize;
                 index += 2;
-                let data = &script[(index + 1)..(index + 1 + data_len)];
-                index += data_len;
-                format!("PUSHDATA2 {} {}", data_len, hex::encode(data))
+                if index + 1 + data_len <= script.len() {
+                    let data = &script[(index + 1)..(index + 1 + data_len)];
+                    index += data_len;
+                    format!("PUSHDATA1 {} {}", data_len, hex::encode(data))
+                } else {
+                    index += data_len;
+                    format!("PUSHBYTES_{} <overflow>", byte)
+                }
             }
             0x4e => {
                 let data_len = u32::from_le_bytes([
@@ -43,9 +53,14 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                     script[index + 4],
                 ]) as usize;
                 index += 4;
-                let data = &script[(index + 1)..(index + 1 + data_len)];
-                index += data_len;
-                format!("PUSHDATA4 {} {}", data_len, hex::encode(data))
+                if index + 1 + data_len <= script.len() {
+                    let data = &script[(index + 1)..(index + 1 + data_len)];
+                    index += data_len;
+                    format!("PUSHDATA1 {} {}", data_len, hex::encode(data))
+                } else {
+                    index += data_len;
+                    format!("PUSHBYTES_{} <overflow>", byte)
+                }
             }
             0x4f => "1NEGATE".to_string(),
             0x50 => "RESERVED".to_string(),
