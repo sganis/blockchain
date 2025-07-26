@@ -19,6 +19,9 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                 }
             },
             0x4c => {
+                if index + 1 >= script.len() {
+                    return "PUSHDATA1 <overflow>".to_string();
+                }
                 let data_len = script[index + 1] as usize;
                 index += 1;
                 if index + 1 + data_len <= script.len() {
@@ -31,6 +34,9 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                 }
             }
             0x4d => {
+                if index + 2 >= script.len() {
+                    return "PUSHDATA2 <overflow>".to_string();
+                }
                 let data_len = u16::from_le_bytes([
                     script[index + 1], 
                     script[index + 2]
@@ -46,6 +52,9 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
                 }
             }
             0x4e => {
+                if index + 4 >= script.len() {
+                    return "PUSHDATA4 <overflow>".to_string();
+                }
                 let data_len = u32::from_le_bytes([
                     script[index + 1],
                     script[index + 2],
@@ -94,15 +103,15 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
             0x7b => "ROT".to_string(),
             0x7c => "SWAP".to_string(),
             0x7d => "TUCK".to_string(),            
-            //0x7e => "CAT".to_string(),
-            //0x7f => "SUBSTR".to_string(),
-            //0x80 => "LEFT".to_string(),
-            //0x81 => "RIGHT".to_string(),
+            0x7e => "CAT".to_string(),
+            0x7f => "SUBSTR".to_string(),
+            0x80 => "LEFT".to_string(),
+            0x81 => "RIGHT".to_string(),
             0x82 => "SIZE".to_string(),
-            //0x83 => "INVERT".to_string(),
-            //0x84 => "AND".to_string(),
-            //0x85 => "OR".to_string(),
-            //0x86 => "XOR".to_string(),
+            0x83 => "INVERT".to_string(),
+            0x84 => "AND".to_string(),
+            0x85 => "OR".to_string(),
+            0x86 => "XOR".to_string(),
             0x87 => "EQUAL".to_string(),
             0x88 => "EQUALVERIFY".to_string(),            
             0x89 => "RESERVED1".to_string(),            
@@ -157,11 +166,13 @@ pub fn script_to_opcodes(script: &[u8], debug: bool) -> String {
             0xba => "CHECKSIGADD".to_string(),
             0xbb..=0xfe => format!("RETURN_{}", byte),
             0xff => "INVALIDOPCODE".to_string(),            
-            _ => format!("UNKNOWN({})", byte),
+            _ => {
+                format!("UNKNOWN(0x{:02x})", byte)
+            },
         };
-        if debug {
-            println!("{}", opcode.to_string());
-        }
+        // if debug {
+        //     println!("{}", opcode.to_string());
+        // }
         opcodes.push(opcode.to_string());        
         index += 1;
     }
