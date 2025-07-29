@@ -3,6 +3,7 @@ mod hash;
 mod transaction;
 
 use anyhow::Result;
+use std::time::Instant;
 use hex;
 use sha2::{Sha256, Digest};
 use chrono::prelude::{TimeZone, Utc};
@@ -86,16 +87,13 @@ struct Tx {
     lock_time: [u8; 4],
 }
 struct Input {
-    txid: [u8; 32],
+    txid: String,
     vout: u32,
-    script_len: VarInt,
-    script: Vec<u8>,
-    sequence: [u8; 4],
+    script: String,
 }
 struct Output {
-    value: u64,
-    script_len: VarInt,
-    script: Vec<u8>,
+    amount: u64,
+    script: String,
 }
 struct Witness {
 
@@ -110,7 +108,8 @@ fn main() -> Result<()> {
     let mut b8 = vec![0u8; 8];
     let mut b32 = vec![0u8; 32];
     let mut block_number = 0;
-
+    let mut script_pub_hex = String::new();
+    let mut script_sig_hex = String::new();
     let mut tx_types: HashMap<String, usize> = HashMap::new(); // tx_type -> txid
 
     // segwit
@@ -119,23 +118,26 @@ fn main() -> Result<()> {
     // create files with headers
     let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
     let mut blk_w = BufWriter::new(f);
-    writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE,TX_COUNT")?;
+    writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
 
     let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
     let mut tx_w = BufWriter::new(f);
-    writeln!(tx_w, "BLOCK,TXID,INP_COUNT,OUT_COUNT")?;
+    writeln!(tx_w, "BLOCK,TXID,VERSION,LOCKTIME,N_INP,N_OUT,N_WITNESS")?;
     
     let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
     let mut txi_w = BufWriter::new(f);
-    writeln!(txi_w, "TXID,TIN,VOUT,SCRIPT")?;
+    writeln!(txi_w, "TXID,IDX_OUT,VOUT,SCRIPT")?;
 
     let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
     let mut txo_w = BufWriter::new(f);
-    writeln!(txo_w, "TXID,AMOUNT,SCRIPT")?;
+    writeln!(txo_w, "TXID,IDX_OUT,AMOUNT,SCRIPT")?;
 
     let mut debug = false;
 
-    for file_number in 0..4926 {
+    let start = Instant::now();
+
+    //for file_number in 0..4926 {
+    for file_number in 0..1 {
         // if file_number != 4 {
         //     continue;
         // }
@@ -156,7 +158,8 @@ fn main() -> Result<()> {
             // }
 
             let magic = u32::from_le_bytes(b4[..4].try_into()?);
-            assert!(magic == MAGIC, "Wrong magic number");    
+            assert!(magic == MAGIC, "Wrong magic number"); 
+            reader.read_exact(&mut b4)?;  
             //let bsize = u32::from_le_bytes(b4[..4].try_into()?);
             
             // block
@@ -181,7 +184,7 @@ fn main() -> Result<()> {
             let date_str = datetime.format("%Y-%m-%d");
             let time_str = datetime.format("%H:%M:%S");            
             
-            println!("FILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);
+            // println!("FILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);
             
             // bits
             reader.read_exact(&mut b4)?;
@@ -198,14 +201,13 @@ fn main() -> Result<()> {
             if debug {
                 println!("Transactions: {}", tx_count.value());
             }
-            writeln!(blk_w, "{},{},{},{},{}", 
+            writeln!(blk_w, "{},{},{},{},{},{},{},{},{}", 
                 file_number, block_number, date_str, time_str,
-                // hex::encode(version), 
-                // hex::encode(prev_hash), 
-                // hex::encode(merkle_root), 
-                // hex::encode(bits), 
-                // hex::encode(nonce),
-                tx_count.value()
+                hex::encode(version), 
+                hex::encode(prev_hash), 
+                hex::encode(merkle_root), 
+                hex::encode(bits), 
+                hex::encode(nonce)
             )?;
             
             // tx
@@ -244,16 +246,25 @@ fn main() -> Result<()> {
 
                 hasher.update(&in_count.data()[..in_count.len() as usize]);
                 
+                let mut inputs = Vec::with_capacity(in_count.value() as usize);
+
                 // input
                 for _ in 0..in_count.value() {
-                    // prev tx hash
+                    // prev txid
                     reader.read_exact(&mut b32)?;
                     hasher.update(&b32);                
-                    let txid = hex::encode(&b32);
-                    if debug {
-                        println!("  txid     : {}", txid);
-                    }
-                    // prev txout index
+                    // let prev_txid = hex::encode(&b32);
+                    //if debug {
+                    //     println!("  txid     : {}", prev_txid);
+                    //     println!("  txid     : {}", prev_txid);
+                    // //}
+                    let natural_txid = hex::encode(&b32); // natural byte order
+                    let reversed_txid = hex::encode(b32.iter().rev().cloned().collect::<Vec<u8>>()); // Bitcoin uses little-endian
+
+                    //println!("prev_txid (natural):  {}", natural_txid);
+                    //println!("prev_txid (reversed): {}", reversed_txid);
+                    
+                    // prev txid index (vout)
                     reader.read_exact(&mut b4)?;
                     hasher.update(&b4);
                     let vout = u32::from_le_bytes(b4[..4].try_into()?); 
@@ -267,21 +278,28 @@ fn main() -> Result<()> {
                     let mut script_sig = vec![0u8; in_script_len.value() as usize];
                     reader.read_exact(&mut script_sig)?;
                     hasher.update(&script_sig[..script_sig.len() as usize]);
-                    if debug { 
-                        println!("  script_sig hex: {}", hex::encode(&script_sig));
-                    }
+                    //script_sig_hex = hex::encode(&script_sig);
+
+                    // if debug { 
+                    //     println!("  script_sig hex: {}", script_sig_hex);
+                    // }
                     
-                    // let opcode = script_to_opcodes(&script_sig, debug);
+                    let opcode = script_to_opcodes(&script_sig, debug);
                     // if debug { 
                     //     println!("  script_sig: {}", opcode);
                     // }
-                    // sequence
+                    
+                    // sequence, set whether the transaction can be replaced or when it can be mined
                     reader.read_exact(&mut b4)?;
                     hasher.update(&b4);
                     //println!("  sequence nr : {}", hex::encode(&b4));
-
-                    // writeln!(txi_w, "{},{},{}", txid, vout, opcode)?;
-            
+                    let input = Input {
+                        txid: reversed_txid,
+                        vout: vout,
+                        // script: hex::encode(&script_sig),
+                        script: opcode,
+                    };
+                    inputs.push(input);            
                 }
 
                 // out-counter
@@ -289,65 +307,80 @@ fn main() -> Result<()> {
                 hasher.update(&out_count.data()[..out_count.len() as usize]);
                 //println!(" Outputs    : {}", out_count.value());
 
+                let mut outputs = Vec::with_capacity(out_count.value() as usize);
+
                 // output
                 for i in 0..out_count.value() {
                     // sat value
                     reader.read_exact(&mut b8)?;
                     hasher.update(&b8);
-                    let value = u64::from_le_bytes(b8[..8].try_into()?);
+                    let satvalue = u64::from_le_bytes(b8[..8].try_into()?);
                     // if value != 50 {
                     //     debug = true;
                     // }
                     if debug {
-                        println!("  Output {}/{}: {}", i+1, out_count.value(), value);
+                        println!("  Output {}/{}: {}", i+1, out_count.value(), satvalue);
                     }
                     // tx in script len
                     let script_len = read_varint(&mut reader)?;
                     hasher.update(&script_len.data()[..script_len.len() as usize]);
                     //println!("  script_len: {}", script_len.value());
                     
-                    // scriptpk
+                    // script pub
                     if script_len.value() > 0 {
-                        let mut script_pky = vec![0u8; script_len.value() as usize];
-                        reader.read_exact(&mut script_pky)?;
-                        hasher.update(&script_pky[..script_pky.len() as usize]);
+                        let mut script_pub = vec![0u8; script_len.value() as usize];
+                        reader.read_exact(&mut script_pub)?;
+                        hasher.update(&script_pub[..script_pub.len() as usize]);
                         // if debug {
-                        //     println!("  script_pub hex: {}", hex::encode(&script_pky));
+                        //     println!("  script_pub hex: {}", hex::encode(&script_pub));
                         // }
-                        let tx_type = get_tx_type(&script_pky);                        
-                        if debug {
-                            println!("     tx type: {}", tx_type);
-                        }
-                        // let opcode = script_to_opcodes(&script_pky, debug);
+                        let opcode = script_to_opcodes(&script_pub, debug);
                         // if debug {
                         //     println!("  script_pub: {}", opcode);
                         // }                        
+                        let output = Output {
+                            amount: satvalue,
+                            // script: hex::encode(&script_pub),
+                            script: opcode,
+                        };
+                        outputs.push(output);
+
+                        let (tx_type, address) = get_tx_type(&script_pub);                        
+                        if debug {
+                            println!("     tx type: {}", tx_type);
+                        }
+                        
+                        
 
                         let script_type = tx_type.to_string();                       
 
                         if !tx_types.contains_key(&script_type) {
                             tx_types.insert(script_type.clone(), 1);   
-                            //println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                            println!("first time tx type: {:<10}", tx_type);
+                            println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
+                            println!("first time tx type: {:<10}. Address: {}", tx_type, address.unwrap_or_else(|| "N/A".to_string()));
                         } else {
                             tx_types.insert(script_type.clone(), tx_types[&script_type] + 1);
                         }
 
-                        if tx_type == "Unknown" {
-                            //println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                            println!("  Unknown tx type:");
-                            println!("       script_pub: {}", &hex::encode(&script_pky));
-                            let opcode = script_to_opcodes(&script_pky, debug);
-                            println!("       opcode    : {}", opcode);                             
-                        } 
+                        // if tx_type == "Unknown" {
+                        //     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
+                        //     println!("  Unknown tx type:");
+                        //     println!("       script_pub: {}", &hex::encode(&script_pub));
+                        //     let opcode = script_to_opcodes(&script_pub, debug);
+                        //     println!("       opcode    : {}", opcode);                             
+                        // } 
                     }
-                    //writeln!(txo_w, "{},{},{}", txid, vout, opcode)?;
+                    
 
                 }
+
                 // witnesses
+                let mut witness_count = 0;
+
                 if has_witness {
                     for _ in 0..in_count.value() {
                         let wit_count = read_varint(&mut reader)?;
+                        witness_count = wit_count.value();
                         if debug {
                             println!("  witness items : {}", wit_count.value());
                         }
@@ -364,6 +397,7 @@ fn main() -> Result<()> {
                 }
                 // lock time
                 reader.read_exact(&mut b4)?;
+                let locktime = hex::encode(&b4);
                 //println!("lock_time : {}", hex::encode(&b4));
                 hasher.update(&b4);
                 let hash = hasher.finalize();
@@ -374,8 +408,16 @@ fn main() -> Result<()> {
                 //     debug = false;
                 // }
                 
-                //writeln!(tx_w, "{},{},{},{}",block_number, txid, in_count.value(), out_count.value())?;
-            
+                writeln!(tx_w, "{},{},{},{},{},{},{}",
+                    block_number, txid, version, locktime,
+                    in_count.value(), out_count.value(), witness_count)?;
+                
+                for (i, input) in inputs.iter().enumerate() {
+                    writeln!(txi_w, "{},{},{},{}", txid, &input.txid, input.vout, &input.script)?;
+                }
+                for (i, output) in outputs.iter().enumerate() {
+                    writeln!(txo_w, "{},{},{}", txid, output.amount, &output.script)?;
+                }
             }   
 
             blk_w.flush()?;
@@ -387,6 +429,9 @@ fn main() -> Result<()> {
         }
     }
     
+    let duration = start.elapsed();
+    println!("Time elapsed: {:.2?}", duration);
+
     println!("\n--- Transaction Type Summary ---");
     for (tx_type, count) in &tx_types {
         println!("{:<10} {}", tx_type, count);
