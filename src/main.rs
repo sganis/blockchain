@@ -2,68 +2,73 @@ mod opcodes;
 mod hash;
 mod transaction;
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use std::time::Instant;
 use hex;
 use sha2::{Sha256, Digest};
 use chrono::prelude::{TimeZone, Utc};
 use std::{
     fs::File, 
-    fs::OpenOptions, 
-    io::{BufReader, Write, Read, BufWriter},
-    collections::HashMap
+    io::{BufReader, Write, Read, BufWriter, Seek, SeekFrom},
+    collections::HashMap,
+    path::Path,
 };
 use opcodes::script_to_opcodes;
 use transaction::get_tx_type;
 
 const MAGIC: u32 = 3_652_501_241; // FEBEB4D9
+const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer
 
-struct VarInt(u64, u32, [u8; 9]);
+#[derive(Debug, Clone)]
+struct VarInt {
+    value: u64,
+    len: u32,
+    data: [u8; 9],
+}
+
 impl VarInt {
-    fn value(&self) -> u64 {
-        self.0
-    }
-    fn len(&self) -> u32 {
-        self.1
-    }
-    fn data(&self) -> [u8; 9] {
-        self.2
+    fn new(value: u64, len: u32, data: [u8; 9]) -> Self {
+        Self { value, len, data }
     }
 }
+
 fn read_varint<T: Read>(reader: &mut BufReader<T>) -> Result<VarInt> {
-    let mut b1 = vec![0u8; 1];
-    let mut b2 = vec![0u8; 2];
-    let mut b4 = vec![0u8; 4];
-    let mut b8 = vec![0u8; 8];
-
-    reader.read_exact(&mut b1)?;
-    let number = u8::from_le_bytes(b1[..].try_into()?) as u64;
-    let mut data = [0u8; 9];
-    data[0] = b1[0];
-
-    let varint = match number {
+    let mut buffer = [0u8; 9];
+    
+    reader.read_exact(&mut buffer[0..1])
+        .context("Failed to read varint first byte")?;
+    
+    let first_byte = buffer[0];
+    
+    match first_byte {
         253 => {
-            reader.read_exact(&mut b2)?;
-            data[1..3].copy_from_slice(&b2[..]);
-            VarInt(u16::from_le_bytes(b2[..].try_into()?) as u64, 3, data)
+            reader.read_exact(&mut buffer[1..3])
+                .context("Failed to read varint 2-byte value")?;
+            let value = u16::from_le_bytes([buffer[1], buffer[2]]) as u64;
+            Ok(VarInt::new(value, 3, buffer))
         },
         254 => {
-            reader.read_exact(&mut b4)?;
-            data[1..5].copy_from_slice(&b4[..]);
-            VarInt(u32::from_le_bytes(b4[..4].try_into()?) as u64, 5, data)
+            reader.read_exact(&mut buffer[1..5])
+                .context("Failed to read varint 4-byte value")?;
+            let value = u32::from_le_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as u64;
+            Ok(VarInt::new(value, 5, buffer))
         },
         255 => {
-            reader.read_exact(&mut b8)?;
-            data[1..9].copy_from_slice(&b8[..]);
-            VarInt(u64::from_le_bytes(b8[..8].try_into()?), 9, data)
+            reader.read_exact(&mut buffer[1..9])
+                .context("Failed to read varint 8-byte value")?;
+            let value = u64::from_le_bytes([
+                buffer[1], buffer[2], buffer[3], buffer[4],
+                buffer[5], buffer[6], buffer[7], buffer[8]
+            ]);
+            Ok(VarInt::new(value, 9, buffer))
         },
         _ => {
-            VarInt(number, 1, data)
+            Ok(VarInt::new(first_byte as u64, 1, buffer))
         }
-    };
-    //println!("VarInt: {} {} {:?}", varint.value(), varint.len(), varint.data());
-    Ok(varint)
+    }
 }
+
+#[derive(Debug)]
 struct Header {
     version: [u8; 4],
     prev_hash: [u8; 32],
@@ -72,36 +77,47 @@ struct Header {
     bits: [u8; 4],
     nonce: [u8; 4],
 }
+
+#[derive(Debug)]
 struct Block {
-    size: u32,
     header: Header,
     transactions: Vec<Tx>,
 }
+
+#[derive(Debug)]
 struct Tx {
+    id: u64,
     version: u32,
     flag: Option<[u8; 2]>,
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     witnesses: Option<Vec<Witness>>,
     lock_time: [u8; 4],
+    txid: String,
 }
+
+#[derive(Debug)]
 struct Input {
     id: u64,
     txid: String,
     vout: u32,
-    script: String,
+    script: Vec<u8>, // Store raw bytes instead of hex string
     sequence: u32,
 }
+
+#[derive(Debug)]
 struct Output {
     id: u64,
     amount: u64,
-    script: String,
+    script: Vec<u8>, // Store raw bytes instead of hex string
 }
+
+#[derive(Debug)]
 struct Witness {
     id: u64,
     txiid: u64,
     index: usize,
-    data: String,
+    data: Vec<u8>, // Store raw bytes instead of hex string
 }
 
 pub struct IdGenerator {
@@ -123,389 +139,449 @@ impl IdGenerator {
     }
 }
 
+struct CsvWriters {
+    blocks: BufWriter<File>,
+    transactions: BufWriter<File>,
+    inputs: BufWriter<File>,
+    outputs: BufWriter<File>,
+    witnesses: BufWriter<File>,
+}
 
+impl CsvWriters {
+    fn new(output_dir: &str) -> Result<Self> {
+        std::fs::create_dir_all(output_dir)
+            .context("Failed to create output directory")?;
+
+        let blocks = Self::create_csv_file(&format!("{}/blocks.csv", output_dir), 
+            "ID,FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
+        
+        let transactions = Self::create_csv_file(&format!("{}/tx.csv", output_dir), 
+            "ID,BLOCK,TXID,VERSION,LOCKTIME")?;
+        
+        let inputs = Self::create_csv_file(&format!("{}/txi.csv", output_dir), 
+            "ID,TXID,VOUT,SCRIPT,SEQUENCE")?;
+        
+        let outputs = Self::create_csv_file(&format!("{}/txo.csv", output_dir), 
+            "ID,TXID,AMOUNT,SCRIPT")?;
+        
+        let witnesses = Self::create_csv_file(&format!("{}/wit.csv", output_dir), 
+            "ID,INDEX,DATA")?;
+
+        Ok(Self {
+            blocks,
+            transactions,
+            inputs,
+            outputs,
+            witnesses,
+        })
+    }
+
+    fn create_csv_file(path: &str, header: &str) -> Result<BufWriter<File>> {
+        let file = File::create(path)
+            .context(format!("Unable to create file: {}", path))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "{}", header)?;
+        Ok(writer)
+    }
+
+    fn flush_all(&mut self) -> Result<()> {
+        self.blocks.flush().context("Failed to flush blocks file")?;
+        self.transactions.flush().context("Failed to flush transactions file")?;
+        self.inputs.flush().context("Failed to flush inputs file")?;
+        self.outputs.flush().context("Failed to flush outputs file")?;
+        self.witnesses.flush().context("Failed to flush witnesses file")?;
+        Ok(())
+    }
+}
+
+struct BlockParser {
+    id_gen: IdGenerator,
+    writers: CsvWriters,
+    tx_types: HashMap<String, usize>,
+    debug: bool,
+}
+
+impl BlockParser {
+    fn new(output_dir: &str, debug: bool) -> Result<Self> {
+        Ok(Self {
+            id_gen: IdGenerator::new(),
+            writers: CsvWriters::new(output_dir)?,
+            tx_types: HashMap::new(),
+            debug,
+        })
+    }
+
+    fn parse_header<T: Read>(&self, reader: &mut BufReader<T>) -> Result<Header> {
+        let mut version = [0u8; 4];
+        let mut prev_hash = [0u8; 32];
+        let mut merkle_root = [0u8; 32];
+        let mut time = [0u8; 4];
+        let mut bits = [0u8; 4];
+        let mut nonce = [0u8; 4];
+
+        reader.read_exact(&mut version)?;
+        reader.read_exact(&mut prev_hash)?;
+        reader.read_exact(&mut merkle_root)?;
+        reader.read_exact(&mut time)?;
+        reader.read_exact(&mut bits)?;
+        reader.read_exact(&mut nonce)?;
+
+        Ok(Header { version, prev_hash, merkle_root, time, bits, nonce })
+    }
+
+    fn parse_input<T: Read>(&mut self, reader: &mut BufReader<T>, hasher: &mut Sha256) -> Result<Input> {
+        let mut txid_bytes = [0u8; 32];
+        let mut vout_bytes = [0u8; 4];
+
+        reader.read_exact(&mut txid_bytes)?;
+        hasher.update(&txid_bytes);
+        
+        let reversed_txid = hex::encode(txid_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+
+        reader.read_exact(&mut vout_bytes)?;
+        hasher.update(&vout_bytes);
+        let vout = u32::from_le_bytes(vout_bytes);
+
+        let script_len = read_varint(reader)?;
+        hasher.update(&script_len.data[..script_len.len as usize]);
+
+        let mut script = vec![0u8; script_len.value as usize];
+        reader.read_exact(&mut script)?;
+        hasher.update(&script);
+
+        let mut sequence_bytes = [0u8; 4];
+        reader.read_exact(&mut sequence_bytes)?;
+        hasher.update(&sequence_bytes);
+        let sequence = u32::from_le_bytes(sequence_bytes);
+
+        Ok(Input {
+            id: self.id_gen.next_id("txi"),
+            txid: reversed_txid,
+            vout,
+            script,
+            sequence,
+        })
+    }
+
+    fn parse_output<T: Read>(&mut self, reader: &mut BufReader<T>, hasher: &mut Sha256) -> Result<Output> {
+        let mut amount_bytes = [0u8; 8];
+        reader.read_exact(&mut amount_bytes)?;
+        hasher.update(&amount_bytes);
+        let amount = u64::from_le_bytes(amount_bytes);
+
+        let script_len = read_varint(reader)?;
+        hasher.update(&script_len.data[..script_len.len as usize]);
+
+        let mut script = vec![0u8; script_len.value as usize];
+        if script_len.value > 0 {
+            reader.read_exact(&mut script)?;
+            hasher.update(&script);
+        }
+
+        Ok(Output {
+            id: self.id_gen.next_id("txo"),
+            amount,
+            script,
+        })
+    }
+
+    fn parse_witnesses<T: Read>(&mut self, reader: &mut BufReader<T>, inputs: &[Input]) -> Result<Vec<Witness>> {
+        let mut witnesses = Vec::new();
+
+        for input in inputs {
+            let wit_count = read_varint(reader)?;
+            
+            for j in 0..wit_count.value {
+                let wit_len = read_varint(reader)?.value;
+                let mut wit_data = vec![0u8; wit_len as usize];
+                reader.read_exact(&mut wit_data)?;
+
+                witnesses.push(Witness {
+                    id: self.id_gen.next_id("wit"),
+                    txiid: input.id,
+                    index: j as usize,
+                    data: wit_data,
+                });
+            }
+        }
+
+        Ok(witnesses)
+    }
+
+    fn calculate_txid(hasher: Sha256) -> String {
+        let hash = hasher.finalize();
+        hex::encode(&hash::reverse(&Sha256::digest(&hash)))
+    }
+
+    fn parse_transaction<T: Read>(&mut self, reader: &mut BufReader<T>) -> Result<Tx> {
+        let mut hasher = Sha256::new();
+        let mut version_bytes = [0u8; 4];
+
+        reader.read_exact(&mut version_bytes)?;
+        hasher.update(&version_bytes);
+        let version = u32::from_le_bytes(version_bytes);
+
+        let mut in_count = read_varint(reader)?;
+        let mut has_witness = false;
+
+        // Check for SegWit flag
+        if in_count.value == 0 {
+            has_witness = true;
+            let mut flag = [0u8; 1];
+            reader.read_exact(&mut flag)?;
+            if flag[0] != 0x01 {
+                return Err(anyhow::anyhow!("Invalid SegWit flag"));
+            }
+            in_count = read_varint(reader)?;
+        }
+
+        hasher.update(&in_count.data[..in_count.len as usize]);
+
+        // Parse inputs
+        let mut inputs = Vec::with_capacity(in_count.value as usize);
+        for _ in 0..in_count.value {
+            inputs.push(self.parse_input(reader, &mut hasher)?);
+        }
+
+        // Parse outputs
+        let out_count = read_varint(reader)?;
+        hasher.update(&out_count.data[..out_count.len as usize]);
+
+        let mut outputs = Vec::with_capacity(out_count.value as usize);
+        for _ in 0..out_count.value {
+            outputs.push(self.parse_output(reader, &mut hasher)?);
+        }
+
+        // Parse witnesses if present
+        let witnesses = if has_witness {
+            Some(self.parse_witnesses(reader, &inputs)?)
+        } else {
+            None
+        };
+
+        // Lock time
+        let mut lock_time = [0u8; 4];
+        reader.read_exact(&mut lock_time)?;
+        hasher.update(&lock_time);
+
+        let txid = Self::calculate_txid(hasher);
+
+        Ok(Tx {
+            id: self.id_gen.next_id("tx"),
+            version,
+            flag: if has_witness { Some([0x00, 0x01]) } else { None },
+            inputs,
+            outputs,
+            witnesses,
+            lock_time,
+            txid,
+        })
+    }
+
+    fn write_block_data(&mut self, block: &Block, file_number: u32, block_number: u32) -> Result<()> {
+        let timestamp = u32::from_le_bytes(block.header.time) as i64;
+        let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
+        let date_str = datetime.format("%Y-%m-%d");
+        let time_str = datetime.format("%H:%M:%S");
+
+        // Write block
+        let block_id = self.id_gen.next_id("blk");
+        writeln!(self.writers.blocks, "{},{},{},{},{},{},{},{},{},{}", 
+            block_id, file_number, block_number, date_str, time_str,
+            hex::encode(block.header.version), 
+            hex::encode(block.header.prev_hash), 
+            hex::encode(block.header.merkle_root), 
+            hex::encode(block.header.bits), 
+            hex::encode(block.header.nonce)
+        )?;
+
+        // Write transactions and related data
+        for tx in &block.transactions {
+            writeln!(self.writers.transactions, "{},{},{},{},{}", 
+                tx.id, block_number, tx.txid, tx.version, hex::encode(tx.lock_time))?;
+
+            // Write inputs
+            for input in &tx.inputs {
+                writeln!(self.writers.inputs, "{},{},{},{},{}", 
+                    input.id, tx.txid, input.vout, hex::encode(&input.script), input.sequence)?;
+            }
+
+            // Write outputs
+            for output in &tx.outputs {
+                writeln!(self.writers.outputs, "{},{},{},{}", 
+                    output.id, tx.txid, output.amount, hex::encode(&output.script))?;
+            }
+
+            // Write witnesses
+            if let Some(witnesses) = &tx.witnesses {
+                for witness in witnesses {
+                    writeln!(self.writers.witnesses, "{},{},{}", 
+                        witness.id, witness.index, hex::encode(&witness.data))?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_block_file(&mut self, file_path: &Path, file_number: u32) -> Result<u32> {
+        let file = File::open(file_path)
+            .context(format!("Failed to open file: {}", file_path.display()))?;
+        let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
+        let mut block_count = 0;
+
+        loop {
+            let mut magic_bytes = [0u8; 4];
+            if reader.read_exact(&mut magic_bytes).is_err() {
+                break; // EOF
+            }
+
+            let magic = u32::from_le_bytes(magic_bytes);
+            if magic != MAGIC {
+                return Err(anyhow::anyhow!("Invalid magic number in file {}", file_number));
+            }
+
+            // Read block size (we don't use it but need to consume it)
+            let mut _size_bytes = [0u8; 4];
+            reader.read_exact(&mut _size_bytes)?;
+
+            // Parse block header
+            let header = self.parse_header(&mut reader)?;
+
+            // Parse transactions
+            let tx_count = read_varint(&mut reader)?;
+            let mut transactions = Vec::with_capacity(tx_count.value as usize);
+
+            for _ in 0..tx_count.value {
+                transactions.push(self.parse_transaction(&mut reader)?);
+            }
+
+            let block = Block { header, transactions };
+            
+            if self.debug {
+                let timestamp = u32::from_le_bytes(block.header.time) as i64;
+                let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
+                println!("FILE {} BLOCK {} {} {}", 
+                    file_number, block_count, 
+                    datetime.format("%Y-%m-%d"), 
+                    datetime.format("%H:%M:%S"));
+            }
+
+            self.write_block_data(&block, file_number, block_count)?;
+            block_count += 1;
+
+            // if self.debug && block_count >= 30 {
+            //     break;
+            // }
+        }
+
+        Ok(block_count)
+    }
+
+    fn run(&mut self, blocks_dir: &str, file_range: std::ops::Range<u32>) -> Result<()> {
+        let start = Instant::now();
+        let mut total_blocks = 0;
+
+        for file_number in file_range {
+            let file_path = Path::new(blocks_dir).join(format!("blk{:05}.dat", file_number));
+            
+            if !file_path.exists() {
+                if self.debug {
+                    println!("File {} does not exist, skipping", file_path.display());
+                }
+                continue;
+            }
+
+            match self.parse_block_file(&file_path, file_number) {
+                Ok(block_count) => {
+                    total_blocks += block_count;
+                    println!("Processed {} blocks from file {}", block_count, file_number);
+                }
+                Err(e) => {
+                    eprintln!("Error processing file {}: {}", file_number, e);
+                    continue;
+                }
+            }
+
+            // Flush periodically
+            if file_number % 10 == 0 {
+                self.writers.flush_all()?;
+            }
+        }
+
+        self.writers.flush_all()?;
+
+        let duration = start.elapsed();
+        println!("Processed {} total blocks in {:.2?}", total_blocks, duration);
+        
+        if !self.tx_types.is_empty() {
+            println!("\n--- Transaction Type Summary ---");
+            for (tx_type, count) in &self.tx_types {
+                println!("{:<15} {}", tx_type, count);
+            }
+        }
+
+        Ok(())
+    }
+}
 
 fn main() -> Result<()> {
-    let mut id_gen = IdGenerator::new();
-    let mut b1 = vec![0u8; 1];
-    let mut b4 = vec![0u8; 4];
-    let mut b8 = vec![0u8; 8];
-    let mut b32 = vec![0u8; 32];
-    let mut block_number = 0;
-    let mut script_pub_hex = String::new();
-    let mut script_sig_hex = String::new();
-    let mut tx_types: HashMap<String, usize> = HashMap::new(); // tx_type -> txid
-
-    // testing blocks
-    //let mut file_number = 0;   // first block
-    //let mut file_number = 3;   // luke-jr ascii
-    //let mut file_number = 8;   // P2SH, multisig
-    //let mut file_number = 976; // segwit
-
-    // create files with headers
-    let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
-    let mut blk_w = BufWriter::new(f);
-    writeln!(blk_w, "ID,FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
-
-    let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
-    let mut tx_w = BufWriter::new(f);
-    writeln!(tx_w, "ID,BLOCK,TXID,VERSION,LOCKTIME")?;
+    let args: Vec<String> = std::env::args().collect();
     
-    let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
-    let mut txi_w = BufWriter::new(f);
-    writeln!(txi_w, "ID,TXID,VOUT,SCRIPT,SEQUENCE")?;
+    let root = "data";
+    let blocks_path = &format!("{}/blocks", &root);
+    let csv_path = &format!("{}/csv", &root);
 
-    let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
-    let mut txo_w = BufWriter::new(f);
-    writeln!(txo_w, "ID,TXID,AMOUNT,SCRIPT")?;
+    let blocks_dir = args.get(1)
+        .map(|s| s.as_str())
+        .unwrap_or(blocks_path);
 
-    let f = File::create("F:/csv/wit.csv").expect("Unable to create file");
-    let mut wit_w = BufWriter::new(f);
-    writeln!(wit_w, "ID,INDEX,DATA")?;
+    let output_dir = args.get(2)
+        .map(|s| s.as_str())
+        .unwrap_or(csv_path);
 
-    let mut debug = false;
-
-    let start = Instant::now();
-
-    //for file_number in 0..4926 {
-    //for file_number in 0..1 {
-        let file_number = 976; // for debugging
-        // if file_number != 4 {
-        //     continue;
-        // }
-        let reader = File::open(format!("F:/btc/blocks/blk{:05}.dat", file_number))?;
-        //let reader = File::open("data/blk00000.dat")?;
-        let mut reader = BufReader::new(reader);
-
-        loop {       
-            if reader.read_exact(&mut b4).is_err() {
-                println!("eof for file {}", file_number);
-                break;
-            }
-
-            //println!("\nBLOCK NUMBER: {}", block_number);
-
-            if block_number >=30 {
-                 debug = true;
-            }
-
-            let magic = u32::from_le_bytes(b4[..4].try_into()?);
-            assert!(magic == MAGIC, "Wrong magic number"); 
-
-            // block size
-            reader.read_exact(&mut b4)?;  
-            //let bsize = u32::from_le_bytes(b4[..4].try_into()?);
-            
-            // block
-            // version
-            reader.read_exact(&mut b4)?;
-            let version = b4[..].try_into()?;
-            let version_int = u32::from_le_bytes(b4[..].try_into()?);
-            
-            // previous block hash
-            reader.read_exact(&mut b32)?;
-            let prev_hash = b32[..].try_into()?;
-            
-            // merkle root
-            reader.read_exact(&mut b32)?;
-            let merkle_root = b32[..].try_into()?;
-            
-            // time
-            reader.read_exact(&mut b4)?;
-            let time = b4[..4].try_into()?;
-            let timestamp = u32::from_le_bytes(b4[..].try_into()?) as i64;
-            let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
-            let date_str = datetime.format("%Y-%m-%d");
-            let time_str = datetime.format("%H:%M:%S");            
-            
-            println!("FILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);
-            
-            // bits
-            reader.read_exact(&mut b4)?;
-            let bits = b4[..4].try_into()?;
-
-            // nonce
-            reader.read_exact(&mut b4)?;
-            let nonce = b4[..4].try_into()?;
-            
-            // header
-            let header = Header {version, prev_hash, merkle_root, time, bits, nonce};
-            
-            let tx_count = read_varint(&mut reader)?;
-            if debug {
-                println!("Transactions: {}", tx_count.value());
-            }
-            // let id = id_gen.next_id("blk");
-            // writeln!(blk_w, "{},{},{},{},{},{},{},{},{},{}", 
-            //     id, file_number, block_number, date_str, time_str,
-            //     hex::encode(version), 
-            //     hex::encode(prev_hash), 
-            //     hex::encode(merkle_root), 
-            //     hex::encode(bits), 
-            //     hex::encode(nonce)
-            // )?;
-            
-            // tx
-            for t in 0..tx_count.value() {
-                if debug {
-                    println!(" Transaction: {}", (t + 1));
-                }
-
-                let mut hasher = Sha256::new();
-
-                // version
-                reader.read_exact(&mut b4)?;
-                hasher.update(&b4);
-                let version = u32::from_le_bytes(b4[..].try_into()?);                
-                //println!("version     : {}", hex::encode(&b4));
-                //assert_eq!(version, 1);
-                
-                // optional flag 0001 2 bytes or varint with num of inputs
-                let mut in_count = read_varint(&mut reader)?;
-                if debug { 
-                    println!(" Inputs     : {}", in_count.value());
-                }
-                
-                let mut has_witness = false;
-
-                if in_count.value() == 0 {
-                    has_witness = true;    
-                    reader.read_exact(&mut b1)?;
-                    assert_eq!(hex::encode(&b1), "01");
-                    in_count = read_varint(&mut reader)?;
-                    if debug {
-                        println!("segwit flag, in_counter: {}", in_count.value());
-                    }
-                    //debug = true;                    
-                } 
-
-                hasher.update(&in_count.data()[..in_count.len() as usize]);
-                
-                let mut inputs = Vec::with_capacity(in_count.value() as usize);
-
-                // input
-                for _ in 0..in_count.value() {
-                    // prev txid
-                    reader.read_exact(&mut b32)?;
-                    hasher.update(&b32);                
-                    // let prev_txid = hex::encode(&b32);
-                    //if debug {
-                    //     println!("  txid     : {}", prev_txid);
-                    //     println!("  txid     : {}", prev_txid);
-                    // //}
-                    let natural_txid = hex::encode(&b32); // natural byte order
-                    let reversed_txid = hex::encode(b32.iter().rev().cloned().collect::<Vec<u8>>()); // Bitcoin uses little-endian
-
-                    //println!("prev_txid (natural):  {}", natural_txid);
-                    //println!("prev_txid (reversed): {}", reversed_txid);
-                    
-                    // prev txid index (vout)
-                    reader.read_exact(&mut b4)?;
-                    hasher.update(&b4);
-                    let vout = u32::from_le_bytes(b4[..4].try_into()?); 
-                    //println!("  vout: {}", hex::encode(&b4));
-                    
-                    // tx in script len
-                    let in_script_len = read_varint(&mut reader)?;
-                    hasher.update(&in_script_len.data()[..in_script_len.len() as usize]);
-                    //println!("  script_len: {}", in_script_len.value());
-                    // scriptsig
-                    let mut script_sig = vec![0u8; in_script_len.value() as usize];
-                    reader.read_exact(&mut script_sig)?;
-                    hasher.update(&script_sig[..script_sig.len() as usize]);
-                    //script_sig_hex = hex::encode(&script_sig);
-
-                    // if debug { 
-                    //     println!("  script_sig hex: {}", script_sig_hex);
-                    // }
-                    
-                    let opcode = script_to_opcodes(&script_sig, debug);
-                    // if debug { 
-                    //     println!("  script_sig: {}", opcode);
-                    // }
-                    
-                    // sequence, set whether the transaction can be replaced or when it can be mined
-                    reader.read_exact(&mut b4)?;
-                    hasher.update(&b4);
-                    let sequence = u32::from_le_bytes(b4[..4].try_into()?);
-                    //println!("  sequence nr : {}", hex::encode(&b4));
-
-                    let input = Input {
-                        id: id_gen.next_id("txi"),
-                        txid: reversed_txid,
-                        vout: vout,
-                        script: hex::encode(&script_sig),
-                        //script: opcode,
-                        sequence: sequence,
-                    };
-                    inputs.push(input);            
-                }
-
-                // out-counter
-                let out_count = read_varint(&mut reader)?;
-                hasher.update(&out_count.data()[..out_count.len() as usize]);
-                //println!(" Outputs    : {}", out_count.value());
-
-                let mut outputs = Vec::with_capacity(out_count.value() as usize);
-
-                // output
-                for i in 0..out_count.value() {
-                    // sat value
-                    reader.read_exact(&mut b8)?;
-                    hasher.update(&b8);
-                    let satvalue = u64::from_le_bytes(b8[..8].try_into()?);
-                    // if value != 50 {
-                    //     debug = true;
-                    // }
-                    if debug {
-                        println!("  Output {}/{}: {}", i+1, out_count.value(), satvalue);
-                    }
-                    // tx in script len
-                    let script_len = read_varint(&mut reader)?;
-                    hasher.update(&script_len.data()[..script_len.len() as usize]);
-                    //println!("  script_len: {}", script_len.value());
-                    
-                    // script pub
-                    if script_len.value() > 0 {
-                        let mut script_pub = vec![0u8; script_len.value() as usize];
-                        reader.read_exact(&mut script_pub)?;
-                        hasher.update(&script_pub[..script_pub.len() as usize]);
-                        let script_pub_hex = hex::encode(&script_pub);
-
-                        if debug {
-                            println!("  script_pub hex: {}", script_pub_hex);
-                        }
-                        
-                        //let opcode = script_to_opcodes(&script_pub, debug);
-                        // if debug {
-                        //     println!("  script_pub: {}", opcode);
-                        // }       
-
-                        let output = Output {
-                            id: id_gen.next_id("txo"),
-                            amount: satvalue,
-                            script: hex::encode(&script_pub),
-                            //script: opcode,
-                        };
-                        outputs.push(output);
-
-                        // let (tx_type, address) = get_tx_type(&script_pub);                        
-                        // if debug {
-                        //     println!("     tx type: {}", tx_type);
-                        // }
-                        // let script_type = tx_type.to_string();                       
-
-                        // if !tx_types.contains_key(&script_type) {
-                        //     tx_types.insert(script_type.clone(), 1);   
-                        //     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                        //     println!("first time tx type: {:<10}. Address: {}", tx_type, address.unwrap_or_else(|| "N/A".to_string()));
-                        // } else {
-                        //     tx_types.insert(script_type.clone(), tx_types[&script_type] + 1);
-                        // }
-
-                        // if tx_type == "Unknown" {
-                        //     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                        //     println!("  Unknown tx type:");
-                        //     println!("       script_pub: {}", &hex::encode(&script_pub));
-                        //     let opcode = script_to_opcodes(&script_pub, debug);
-                        //     println!("       opcode    : {}", opcode);                             
-                        // } 
-                    }
-                    
-
-                }
-
-                // witnesses
-                let mut witness_count = 0;
-                let mut witnesses = Vec::new();
-
-                if has_witness {
-                    println!("  SegWit transaction detected");
-                    println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                            
-                    for input in inputs.iter() {
-                        let wit_count = read_varint(&mut reader)?;
-                        witness_count = wit_count.value();
-                        if debug {
-                            println!("  witness items : {}", wit_count.value());
-                        }
-                        for (j, _) in (0..wit_count.value()).enumerate() {
-                            let wit_len = read_varint(&mut reader)?.value();                            
-                            let mut wit_buf = vec![0u8; wit_len as usize];
-                            reader.read_exact(&mut wit_buf)?;
-                            let wit_hex = hex::encode(&wit_buf);
-                            if debug {
-                                println!("  witness : {}: {}", input.txid, &wit_hex);
-                            }
-                            let witness = Witness {
-                                id: id_gen.next_id("wit"),
-                                txiid: input.id,
-                                index: j,
-                                data: wit_hex,
-                            };
-                            witnesses.push(witness);
-                        }
-                    }
-                    //assert!(false, "stop here to debug segwit");
-                }
-
-                // lock time
-                reader.read_exact(&mut b4)?;
-                let locktime = hex::encode(&b4);
-                //println!("lock_time : {}", hex::encode(&b4));
-                hasher.update(&b4);
-                let hash = hasher.finalize();
-                let txid = hex::encode(&hash::reverse(&Sha256::digest(&hash)));
-
-                if debug && has_witness {
-                    println!("first sigwit txid: {}", txid);
-                    assert!("9c1ab453283035800c43eb6461eb46682b81be110a0cb89ee923882a5fd9daa4"==&txid);
-                    assert!(false, "stop here to debug segwit");
-                }
-
-                // let id = id_gen.next_id("tx");
-                // // "ID,BLOCK,TXID,VERSION,LOCKTIME"
-                // writeln!(tx_w, "{},{},{},{},{}", id, block_number, txid, version, locktime)?;
-                
-                // for input in inputs.iter() {
-                //     // "ID,TXID,VOUT,SCRIPT,SEQUENCE"
-                //     writeln!(txi_w, "{},{},{},{},{},{}", 
-                //         input.id, txid, &input.txid, input.vout, &input.script, input.sequence)?;
-                // }
-                // for output in outputs.iter() {
-                //     // "ID,TXID,AMOUNT,SCRIPT"
-                //     let id = id_gen.next_id("txo");                    
-                //     writeln!(txo_w, "{},{},{},{}", 
-                //         output.id, txid, output.amount, &output.script)?;
-                // }
-                // for witness in witnesses.iter() {
-                //     // "ID,TXIID,INDEX,DATA"
-                //     writeln!(wit_w, "{},{},{},{}", 
-                //         witness.id, witness.txiid, witness.index, &witness.data)?;
-                // }
-                
-            }   
-
-            blk_w.flush()?;
-
-            if debug {
-                println!("Block {} processed", block_number);
-                break;
-            }
-
-            block_number +=1;
-
-        }
-    //}
+    let start_file: u32 = args.get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     
-    let duration = start.elapsed();
-    println!("Time elapsed: {:.2?}", duration);
+    let end_file: u32 = args.get(4)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    
+    //let debug = args.contains(&"--debug".to_string());
+    let debug = true;
+    let start_file = 976;
+    let end_file = 977;
 
-    println!("\n--- Transaction Type Summary ---");
-    for (tx_type, count) in &tx_types {
-        println!("{:<10} {}", tx_type, count);
-    }
+    println!("Bitcoin Block Parser");
+    println!("Blocks directory: {}", blocks_dir);
+    println!("Output directory: {}", output_dir);
+    println!("File range: {} to {}", start_file, end_file);
+    println!("Debug mode: {}", debug);
+
+    let mut parser = BlockParser::new(output_dir, debug)?;
+    parser.run(blocks_dir, start_file..end_file)?;
 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_varint_parsing() {
+        // Test small values
+        let data = [42u8, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut cursor = std::io::Cursor::new(&data[..1]);
+        let mut reader = BufReader::new(cursor);
+        let varint = read_varint(&mut reader).unwrap();
+        assert_eq!(varint.value, 42);
+        assert_eq!(varint.len, 1);
+    }
+
+    #[test]
+    fn test_magic_constant() {
+        assert_eq!(MAGIC, 0xD9B4BEF9);
+    }
+}
