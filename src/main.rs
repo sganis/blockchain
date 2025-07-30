@@ -480,14 +480,14 @@ impl BlockParser {
 
             let block = Block { header, transactions };
             
-            if self.debug {
-                let timestamp = u32::from_le_bytes(block.header.time) as i64;
-                let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
-                println!("FILE {} BLOCK {} {} {}", 
-                    file_number, block_count, 
-                    datetime.format("%Y-%m-%d"), 
-                    datetime.format("%H:%M:%S"));
-            }
+            // if self.debug {
+            //     let timestamp = u32::from_le_bytes(block.header.time) as i64;
+            //     let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
+            //     println!("FILE {} BLOCK {} {} {}", 
+            //         file_number, block_count, 
+            //         datetime.format("%Y-%m-%d"), 
+            //         datetime.format("%H:%M:%S"));
+            // }
 
             self.write_block_data(&block, file_number, block_count)?;
             block_count += 1;
@@ -565,9 +565,10 @@ impl BlockParser {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
-    let root = "data";
+    //let root = "data";
+    let root = "F:/btc";
     let blocks_path = &format!("{}/blocks", &root);
-    let csv_path = &format!("{}/csv", &root);
+    let csv_path = &format!("{}/../csv", &root);
 
     let blocks_dir = args.get(1)
         .map(|s| s.as_str())
@@ -587,8 +588,8 @@ fn main() -> Result<()> {
     
     //let debug = args.contains(&"--debug".to_string());
     let debug = true;
-    let start_file = 976;
-    let end_file = 977;
+    // let start_file = 976;
+    // let end_file = 977;
 
     println!("Bitcoin Block Parser");
     println!("Blocks directory: {}", blocks_dir);
