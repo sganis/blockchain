@@ -145,6 +145,7 @@ struct CsvWriters {
     inputs: BufWriter<File>,
     outputs: BufWriter<File>,
     witnesses: BufWriter<File>,
+    addresses: BufWriter<File>,
 }
 
 impl CsvWriters {
@@ -155,17 +156,20 @@ impl CsvWriters {
         let blocks = Self::create_csv_file(&format!("{}/blocks.csv", output_dir), 
             "ID,FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
         
-        let transactions = Self::create_csv_file(&format!("{}/tx.csv", output_dir), 
+        let transactions = Self::create_csv_file(&format!("{}/transactions.csv", output_dir), 
             "ID,BLOCK,TXID,VERSION,LOCKTIME")?;
         
-        let inputs = Self::create_csv_file(&format!("{}/txi.csv", output_dir), 
+        let inputs = Self::create_csv_file(&format!("{}/inputs.csv", output_dir), 
             "ID,TXID,VOUT,SCRIPT,SEQUENCE")?;
         
-        let outputs = Self::create_csv_file(&format!("{}/txo.csv", output_dir), 
-            "ID,TXID,AMOUNT,SCRIPT")?;
+        let outputs = Self::create_csv_file(&format!("{}/outputs.csv", output_dir), 
+            "ID,TXID,AMOUNT,TX_TYPE,SCRIPT")?;
         
-        let witnesses = Self::create_csv_file(&format!("{}/wit.csv", output_dir), 
+        let witnesses = Self::create_csv_file(&format!("{}/witnesses.csv", output_dir), 
             "ID,INDEX,DATA")?;
+
+        let addresses = Self::create_csv_file(&format!("{}/addresses.csv", output_dir), 
+            "ID,OUTPUT_ID,ADDRESS")?;
 
         Ok(Self {
             blocks,
@@ -173,6 +177,7 @@ impl CsvWriters {
             inputs,
             outputs,
             witnesses,
+            addresses,
         })
     }
 
@@ -190,6 +195,7 @@ impl CsvWriters {
         self.inputs.flush().context("Failed to flush inputs file")?;
         self.outputs.flush().context("Failed to flush outputs file")?;
         self.witnesses.flush().context("Failed to flush witnesses file")?;
+        self.addresses.flush().context("Failed to flush addresses file")?;
         Ok(())
     }
 }
@@ -407,9 +413,25 @@ impl BlockParser {
             }
 
             // Write outputs
-            for output in &tx.outputs {
-                writeln!(self.writers.outputs, "{},{},{},{}", 
-                    output.id, tx.txid, output.amount, hex::encode(&output.script))?;
+            for output in &tx.outputs {                
+                // Extract and write address if available
+                let mut tx_type = "unknown".to_string();
+                if !output.script.is_empty() {
+                    if let Ok((tx_typ, address_opt)) = get_tx_type(&output.script) {
+                        tx_type = tx_typ;
+                        if let Some(address) = address_opt {
+                            let address_id = self.id_gen.next_id("addr");
+                            writeln!(self.writers.addresses, "{},{},{}", 
+                                address_id, output.id, address)?;
+                        }
+                        
+                        // Track transaction types
+                        *self.tx_types.entry(tx_type.to_string()).or_insert(0) += 1;
+                    }
+                }
+                writeln!(self.writers.outputs, "{},{},{},{},{}", 
+                    output.id, tx.txid, output.amount, &tx_type, hex::encode(&output.script))?;
+                
             }
 
             // Write witnesses
@@ -482,7 +504,8 @@ impl BlockParser {
         let start = Instant::now();
         let mut total_blocks = 0;
 
-        for file_number in file_range {
+        for file_number in file_range.clone() {
+            let file_start = Instant::now();
             let file_path = Path::new(blocks_dir).join(format!("blk{:05}.dat", file_number));
             
             if !file_path.exists() {
@@ -495,7 +518,9 @@ impl BlockParser {
             match self.parse_block_file(&file_path, file_number) {
                 Ok(block_count) => {
                     total_blocks += block_count;
-                    println!("Processed {} blocks from file {}", block_count, file_number);
+                    let file_duration = file_start.elapsed();
+                    println!("Processed {} blocks from file {} in {:.2?}", 
+                        block_count, file_number, file_duration);
                 }
                 Err(e) => {
                     eprintln!("Error processing file {}: {}", file_number, e);
@@ -512,7 +537,18 @@ impl BlockParser {
         self.writers.flush_all()?;
 
         let duration = start.elapsed();
-        println!("Processed {} total blocks in {:.2?}", total_blocks, duration);
+        let files_processed = file_range.end - file_range.start;
+        let blocks_per_second = if duration.as_secs() > 0 {
+            total_blocks as f64 / duration.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        println!("\n=== Processing Summary ===");
+        println!("Files processed: {}", files_processed);
+        println!("Total blocks: {}", total_blocks);
+        println!("Total time: {:.2?}", duration);
+        println!("Average blocks/second: {:.2}", blocks_per_second);
         
         if !self.tx_types.is_empty() {
             println!("\n--- Transaction Type Summary ---");
@@ -524,6 +560,7 @@ impl BlockParser {
         Ok(())
     }
 }
+
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
