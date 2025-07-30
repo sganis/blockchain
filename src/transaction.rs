@@ -113,12 +113,12 @@ pub fn get_tx_type(script: &[u8]) -> (String, Option<String>) {
                     if !ascii_parts.is_empty() {
                         return (format!("{m}-of-{n_val} Multisig with ASCII data"), Some(p2sh_addr));
                     } else {
-                        let addr_info = if !pubkey_addresses.is_empty() {
-                            format!(" (pubkey addrs: {})", pubkey_addresses.join(", "))
-                        } else {
-                            String::new()
-                        };
-                        return (format!("{m}-of-{n_val} Multisig{}", addr_info), Some(p2sh_addr));
+                        // let addr_info = if !pubkey_addresses.is_empty() {
+                        //     format!(" (pubkey addrs: {})", pubkey_addresses.join(", "))
+                        // } else {
+                        //     String::new()
+                        // };
+                        return (format!("{m}-of-{n_val} Multisig"), Some(p2sh_addr));
                     }
                 }
             }

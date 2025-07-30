@@ -13,7 +13,6 @@ use std::{
     io::{BufReader, Write, Read, BufWriter},
     collections::HashMap
 };
-
 use opcodes::script_to_opcodes;
 use transaction::get_tx_type;
 
@@ -87,22 +86,47 @@ struct Tx {
     lock_time: [u8; 4],
 }
 struct Input {
+    id: u64,
     txid: String,
     vout: u32,
     script: String,
+    sequence: u32,
 }
 struct Output {
+    id: u64,
     amount: u64,
     script: String,
 }
 struct Witness {
+    id: u64,
+    txiid: u64,
+    index: usize,
+    data: String,
+}
 
+pub struct IdGenerator {
+    counters: HashMap<&'static str, u64>,
+}
+
+impl IdGenerator {
+    pub fn new() -> Self {
+        Self {
+            counters: HashMap::new(),
+        }
+    }
+
+    pub fn next_id(&mut self, table: &'static str) -> u64 {
+        let counter = self.counters.entry(table).or_insert(1);
+        let id = *counter;
+        *counter += 1;
+        id
+    }
 }
 
 
 
-
 fn main() -> Result<()> {
+    let mut id_gen = IdGenerator::new();
     let mut b1 = vec![0u8; 1];
     let mut b4 = vec![0u8; 4];
     let mut b8 = vec![0u8; 8];
@@ -118,19 +142,23 @@ fn main() -> Result<()> {
     // create files with headers
     let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
     let mut blk_w = BufWriter::new(f);
-    writeln!(blk_w, "FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
+    writeln!(blk_w, "ID,FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
 
     let f = File::create("F:/csv/tx.csv").expect("Unable to create file");
     let mut tx_w = BufWriter::new(f);
-    writeln!(tx_w, "BLOCK,TXID,VERSION,LOCKTIME,N_INP,N_OUT,N_WITNESS")?;
+    writeln!(tx_w, "ID,BLOCK,TXID,VERSION,LOCKTIME")?;
     
     let f = File::create("F:/csv/txi.csv").expect("Unable to create file");
     let mut txi_w = BufWriter::new(f);
-    writeln!(txi_w, "TXID,IDX_OUT,VOUT,SCRIPT")?;
+    writeln!(txi_w, "ID,TXID,VOUT,SCRIPT,SEQUENCE")?;
 
     let f = File::create("F:/csv/txo.csv").expect("Unable to create file");
     let mut txo_w = BufWriter::new(f);
-    writeln!(txo_w, "TXID,IDX_OUT,AMOUNT,SCRIPT")?;
+    writeln!(txo_w, "ID,TXID,AMOUNT,SCRIPT")?;
+
+    let f = File::create("F:/csv/wit.csv").expect("Unable to create file");
+    let mut wit_w = BufWriter::new(f);
+    writeln!(wit_w, "ID,INDEX,DATA")?;
 
     let mut debug = false;
 
@@ -138,6 +166,7 @@ fn main() -> Result<()> {
 
     //for file_number in 0..4926 {
     for file_number in 0..1 {
+        let file_number = 976; // for debugging
         // if file_number != 4 {
         //     continue;
         // }
@@ -159,6 +188,8 @@ fn main() -> Result<()> {
 
             let magic = u32::from_le_bytes(b4[..4].try_into()?);
             assert!(magic == MAGIC, "Wrong magic number"); 
+
+            // block size
             reader.read_exact(&mut b4)?;  
             //let bsize = u32::from_le_bytes(b4[..4].try_into()?);
             
@@ -184,7 +215,7 @@ fn main() -> Result<()> {
             let date_str = datetime.format("%Y-%m-%d");
             let time_str = datetime.format("%H:%M:%S");            
             
-            // println!("FILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);
+            println!("FILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);
             
             // bits
             reader.read_exact(&mut b4)?;
@@ -201,14 +232,15 @@ fn main() -> Result<()> {
             if debug {
                 println!("Transactions: {}", tx_count.value());
             }
-            writeln!(blk_w, "{},{},{},{},{},{},{},{},{}", 
-                file_number, block_number, date_str, time_str,
-                hex::encode(version), 
-                hex::encode(prev_hash), 
-                hex::encode(merkle_root), 
-                hex::encode(bits), 
-                hex::encode(nonce)
-            )?;
+            // let id = id_gen.next_id("blk");
+            // writeln!(blk_w, "{},{},{},{},{},{},{},{},{},{}", 
+            //     id, file_number, block_number, date_str, time_str,
+            //     hex::encode(version), 
+            //     hex::encode(prev_hash), 
+            //     hex::encode(merkle_root), 
+            //     hex::encode(bits), 
+            //     hex::encode(nonce)
+            // )?;
             
             // tx
             for t in 0..tx_count.value() {
@@ -292,12 +324,16 @@ fn main() -> Result<()> {
                     // sequence, set whether the transaction can be replaced or when it can be mined
                     reader.read_exact(&mut b4)?;
                     hasher.update(&b4);
+                    let sequence = u32::from_le_bytes(b4[..4].try_into()?);
                     //println!("  sequence nr : {}", hex::encode(&b4));
+
                     let input = Input {
+                        id: id_gen.next_id("txi"),
                         txid: reversed_txid,
                         vout: vout,
-                        // script: hex::encode(&script_sig),
-                        script: opcode,
+                        script: hex::encode(&script_sig),
+                        //script: opcode,
+                        sequence: sequence,
                     };
                     inputs.push(input);            
                 }
@@ -331,17 +367,21 @@ fn main() -> Result<()> {
                         let mut script_pub = vec![0u8; script_len.value() as usize];
                         reader.read_exact(&mut script_pub)?;
                         hasher.update(&script_pub[..script_pub.len() as usize]);
+                        
                         // if debug {
                         //     println!("  script_pub hex: {}", hex::encode(&script_pub));
                         // }
-                        let opcode = script_to_opcodes(&script_pub, debug);
+
+                        //let opcode = script_to_opcodes(&script_pub, debug);
                         // if debug {
                         //     println!("  script_pub: {}", opcode);
-                        // }                        
+                        // }       
+
                         let output = Output {
+                            id: id_gen.next_id("txo"),
                             amount: satvalue,
-                            // script: hex::encode(&script_pub),
-                            script: opcode,
+                            script: hex::encode(&script_pub),
+                            //script: opcode,
                         };
                         outputs.push(output);
 
@@ -354,13 +394,13 @@ fn main() -> Result<()> {
 
                         let script_type = tx_type.to_string();                       
 
-                        if !tx_types.contains_key(&script_type) {
-                            tx_types.insert(script_type.clone(), 1);   
-                            println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
-                            println!("first time tx type: {:<10}. Address: {}", tx_type, address.unwrap_or_else(|| "N/A".to_string()));
-                        } else {
-                            tx_types.insert(script_type.clone(), tx_types[&script_type] + 1);
-                        }
+                        // if !tx_types.contains_key(&script_type) {
+                        //     tx_types.insert(script_type.clone(), 1);   
+                        //     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
+                        //     println!("first time tx type: {:<10}. Address: {}", tx_type, address.unwrap_or_else(|| "N/A".to_string()));
+                        // } else {
+                        //     tx_types.insert(script_type.clone(), tx_types[&script_type] + 1);
+                        // }
 
                         // if tx_type == "Unknown" {
                         //     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
@@ -376,25 +416,39 @@ fn main() -> Result<()> {
 
                 // witnesses
                 let mut witness_count = 0;
+                let mut witnesses = Vec::new();
 
                 if has_witness {
-                    for _ in 0..in_count.value() {
+                    debug = true;
+                    println!("  SegWit transaction detected");
+                    println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
+                            
+                    for input in inputs.iter() {
                         let wit_count = read_varint(&mut reader)?;
                         witness_count = wit_count.value();
                         if debug {
                             println!("  witness items : {}", wit_count.value());
                         }
-                        for _ in 0..wit_count.value() {
+                        for (j, _) in (0..wit_count.value()).enumerate() {
                             let wit_len = read_varint(&mut reader)?.value();                            
                             let mut wit_buf = vec![0u8; wit_len as usize];
                             reader.read_exact(&mut wit_buf)?;
+                            let wit_hex = hex::encode(&wit_buf);
                             if debug {
-                                println!("  witness : {}: {}", wit_len, hex::encode(wit_buf));
+                                println!("  witness : {}: {}", input.txid, &wit_hex);
                             }
-
+                            let witness = Witness {
+                                id: id_gen.next_id("wit"),
+                                txiid: input.id,
+                                index: j,
+                                data: wit_hex,
+                            };
+                            witnesses.push(witness);
                         }
                     }
+                    //assert!(false, "stop here to debug segwit");
                 }
+
                 // lock time
                 reader.read_exact(&mut b4)?;
                 let locktime = hex::encode(&b4);
@@ -402,27 +456,41 @@ fn main() -> Result<()> {
                 hasher.update(&b4);
                 let hash = hasher.finalize();
                 let txid = hex::encode(&hash::reverse(&Sha256::digest(&hash)));
-                // if debug {
-                //     println!("first sigwit txid: {}", txid);
-                //     assert!("9c1ab453283035800c43eb6461eb46682b81be110a0cb89ee923882a5fd9daa4"==&txid);
-                //     debug = false;
+
+                if debug {
+                    println!("first sigwit txid: {}", txid);
+                    assert!("9c1ab453283035800c43eb6461eb46682b81be110a0cb89ee923882a5fd9daa4"==&txid);
+                }
+
+                // let id = id_gen.next_id("tx");
+                // // "ID,BLOCK,TXID,VERSION,LOCKTIME"
+                // writeln!(tx_w, "{},{},{},{},{}", id, block_number, txid, version, locktime)?;
+                
+                // for input in inputs.iter() {
+                //     // "ID,TXID,VOUT,SCRIPT,SEQUENCE"
+                //     writeln!(txi_w, "{},{},{},{},{},{}", 
+                //         input.id, txid, &input.txid, input.vout, &input.script, input.sequence)?;
+                // }
+                // for output in outputs.iter() {
+                //     // "ID,TXID,AMOUNT,SCRIPT"
+                //     let id = id_gen.next_id("txo");                    
+                //     writeln!(txo_w, "{},{},{},{}", 
+                //         output.id, txid, output.amount, &output.script)?;
+                // }
+                // for witness in witnesses.iter() {
+                //     // "ID,TXIID,INDEX,DATA"
+                //     writeln!(wit_w, "{},{},{},{}", 
+                //         witness.id, witness.txiid, witness.index, &witness.data)?;
                 // }
                 
-                writeln!(tx_w, "{},{},{},{},{},{},{}",
-                    block_number, txid, version, locktime,
-                    in_count.value(), out_count.value(), witness_count)?;
-                
-                for (i, input) in inputs.iter().enumerate() {
-                    writeln!(txi_w, "{},{},{},{}", txid, &input.txid, input.vout, &input.script)?;
-                }
-                for (i, output) in outputs.iter().enumerate() {
-                    writeln!(txo_w, "{},{},{}", txid, output.amount, &output.script)?;
-                }
             }   
 
             blk_w.flush()?;
 
-            //break;
+            if debug {
+                println!("Block {} processed", block_number);
+                break;
+            }
 
             block_number +=1;
 
