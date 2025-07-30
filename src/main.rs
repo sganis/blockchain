@@ -136,8 +136,11 @@ fn main() -> Result<()> {
     let mut script_sig_hex = String::new();
     let mut tx_types: HashMap<String, usize> = HashMap::new(); // tx_type -> txid
 
-    // segwit
-    //let mut file_number = 976;
+    // testing blocks
+    //let mut file_number = 0;   // first block
+    //let mut file_number = 3;   // luke-jr ascii
+    //let mut file_number = 8;   // P2SH, multisig
+    //let mut file_number = 976; // segwit
 
     // create files with headers
     let f = File::create("F:/csv/blocks.csv").expect("Unable to create file");
@@ -165,7 +168,7 @@ fn main() -> Result<()> {
     let start = Instant::now();
 
     //for file_number in 0..4926 {
-    for file_number in 0..1 {
+    //for file_number in 0..1 {
         let file_number = 976; // for debugging
         // if file_number != 4 {
         //     continue;
@@ -182,9 +185,9 @@ fn main() -> Result<()> {
 
             //println!("\nBLOCK NUMBER: {}", block_number);
 
-            // if block_number == 214 {
-            //      debug = true;
-            // }
+            if block_number >=30 {
+                 debug = true;
+            }
 
             let magic = u32::from_le_bytes(b4[..4].try_into()?);
             assert!(magic == MAGIC, "Wrong magic number"); 
@@ -367,11 +370,12 @@ fn main() -> Result<()> {
                         let mut script_pub = vec![0u8; script_len.value() as usize];
                         reader.read_exact(&mut script_pub)?;
                         hasher.update(&script_pub[..script_pub.len() as usize]);
-                        
-                        // if debug {
-                        //     println!("  script_pub hex: {}", hex::encode(&script_pub));
-                        // }
+                        let script_pub_hex = hex::encode(&script_pub);
 
+                        if debug {
+                            println!("  script_pub hex: {}", script_pub_hex);
+                        }
+                        
                         //let opcode = script_to_opcodes(&script_pub, debug);
                         // if debug {
                         //     println!("  script_pub: {}", opcode);
@@ -385,14 +389,11 @@ fn main() -> Result<()> {
                         };
                         outputs.push(output);
 
-                        let (tx_type, address) = get_tx_type(&script_pub);                        
-                        if debug {
-                            println!("     tx type: {}", tx_type);
-                        }
-                        
-                        
-
-                        let script_type = tx_type.to_string();                       
+                        // let (tx_type, address) = get_tx_type(&script_pub);                        
+                        // if debug {
+                        //     println!("     tx type: {}", tx_type);
+                        // }
+                        // let script_type = tx_type.to_string();                       
 
                         // if !tx_types.contains_key(&script_type) {
                         //     tx_types.insert(script_type.clone(), 1);   
@@ -419,7 +420,6 @@ fn main() -> Result<()> {
                 let mut witnesses = Vec::new();
 
                 if has_witness {
-                    debug = true;
                     println!("  SegWit transaction detected");
                     println!("\nFILE {} BLOCK {} {} {}", file_number, block_number, date_str, time_str);             
                             
@@ -457,9 +457,10 @@ fn main() -> Result<()> {
                 let hash = hasher.finalize();
                 let txid = hex::encode(&hash::reverse(&Sha256::digest(&hash)));
 
-                if debug {
+                if debug && has_witness {
                     println!("first sigwit txid: {}", txid);
                     assert!("9c1ab453283035800c43eb6461eb46682b81be110a0cb89ee923882a5fd9daa4"==&txid);
+                    assert!(false, "stop here to debug segwit");
                 }
 
                 // let id = id_gen.next_id("tx");
@@ -495,7 +496,7 @@ fn main() -> Result<()> {
             block_number +=1;
 
         }
-    }
+    //}
     
     let duration = start.elapsed();
     println!("Time elapsed: {:.2?}", duration);
