@@ -146,6 +146,7 @@ struct CsvWriters {
     outputs: BufWriter<File>,
     witnesses: BufWriter<File>,
     addresses: BufWriter<File>,
+    output_addresses: BufWriter<File>,
 }
 
 impl CsvWriters {
@@ -154,22 +155,25 @@ impl CsvWriters {
             .context("Failed to create output directory")?;
 
         let blocks = Self::create_csv_file(&format!("{}/blocks.csv", output_dir), 
-            "ID,FILE,BLOCK,DATE,TIME,VERSION,PREV_HASH,MERKLE_ROOT,BITS,NONCE")?;
+            "BLOCK_ID,FILE_ID,BLOCK_HASH,DATE_TIME,VERSION,PREV_BLOCK_HASH,MERKLE_ROOT,BITS,NONCE,BLOCK_SIZE,TX_COUNT")?;
         
         let transactions = Self::create_csv_file(&format!("{}/transactions.csv", output_dir), 
-            "ID,BLOCK,TXID,VERSION,LOCKTIME")?;
+            "TRANSACTION_ID,BLOCK_ID,TXID,VERSION,LOCK_TIME,IS_SEGWIT,INPUT_COUNT,OUTPUT_COUNT,TX_SIZE")?;
         
         let inputs = Self::create_csv_file(&format!("{}/inputs.csv", output_dir), 
-            "ID,TXID,VOUT,SCRIPT,SEQUENCE")?;
+            "INPUT_ID,TRANSACTION_ID,INPUT_INDEX,PREV_TXID,PREV_VOUT,SCRIPT_SIG,SEQUENCE_NUMBER")?;
         
         let outputs = Self::create_csv_file(&format!("{}/outputs.csv", output_dir), 
-            "ID,TXID,AMOUNT,TX_TYPE,SCRIPT")?;
+            "OUTPUT_ID,TRANSACTION_ID,OUTPUT_INDEX,VALUE,SCRIPT_PUBKEY,SCRIPT_TYPE")?;
         
         let witnesses = Self::create_csv_file(&format!("{}/witnesses.csv", output_dir), 
-            "ID,INDEX,DATA")?;
+            "WITNESS_ID,TRANSACTION_ID,INPUT_ID,INPUT_INDEX,WITNESS_INDEX,WITNESS_DATA,WITNESS_SIZE")?;
 
         let addresses = Self::create_csv_file(&format!("{}/addresses.csv", output_dir), 
-            "ID,OUTPUT_ID,ADDRESS")?;
+            "ADDRESS_ID,ADDRESS,SCRIPT_TYPE,SCRIPT_HASH")?;
+
+        let output_addresses = Self::create_csv_file(&format!("{}/output_addresses.csv", output_dir), 
+            "OUTPUT_ID,ADDRESS_ID")?;
 
         Ok(Self {
             blocks,
@@ -178,6 +182,7 @@ impl CsvWriters {
             outputs,
             witnesses,
             addresses,
+            output_addresses,
         })
     }
 
@@ -196,6 +201,7 @@ impl CsvWriters {
         self.outputs.flush().context("Failed to flush outputs file")?;
         self.witnesses.flush().context("Failed to flush witnesses file")?;
         self.addresses.flush().context("Failed to flush addresses file")?;
+        self.output_addresses.flush().context("Failed to flush output_addresses file")?;
         Ok(())
     }
 }
@@ -205,6 +211,7 @@ struct BlockParser {
     writers: CsvWriters,
     tx_types: HashMap<String, usize>,
     debug: bool,
+    address_cache: HashMap<String, u64>, // Cache for address IDs
 }
 
 impl BlockParser {
@@ -214,6 +221,7 @@ impl BlockParser {
             writers: CsvWriters::new(output_dir)?,
             tx_types: HashMap::new(),
             debug,
+            address_cache: HashMap::new(),
         })
     }
 
@@ -386,60 +394,130 @@ impl BlockParser {
 
     fn write_block_data(&mut self, block: &Block, file_number: u32, block_number: u32) -> Result<()> {
         let timestamp = u32::from_le_bytes(block.header.time) as i64;
-        let datetime = Utc.timestamp_opt(timestamp, 0).single().unwrap(); // Fixed: Use single() instead of unwrap()
+        let datetime = Utc.timestamp_opt(timestamp, 0).single().unwrap();
+        let date_time_str = datetime.format("%Y-%m-%d %H:%M:%S");
 
-        let date_str = datetime.format("%Y-%m-%d");
-        let time_str = datetime.format("%H:%M:%S");
+        // Calculate block hash
+        let mut hasher = Sha256::new();
+        hasher.update(&block.header.version);
+        hasher.update(&block.header.prev_hash);
+        hasher.update(&block.header.merkle_root);
+        hasher.update(&block.header.time);
+        hasher.update(&block.header.bits);
+        hasher.update(&block.header.nonce);
+        let header_hash = hasher.finalize();
+        let block_hash = hex::encode(&hash::reverse(&Sha256::digest(&header_hash)));
+
+        // Calculate block size (approximate)
+        let block_size = 80 + block.transactions.iter().map(|tx| {
+            let base_size = 4 + 4 + 1 + // version + locktime + input_count
+                tx.inputs.len() * 41 + // inputs (approximate)
+                1 + // output_count
+                tx.outputs.iter().map(|out| 8 + 1 + out.script.len()).sum::<usize>(); // outputs
+            
+            let witness_size = if tx.witnesses.is_some() {
+                tx.witnesses.as_ref().unwrap().iter().map(|w| w.data.len() + 1).sum::<usize>()
+            } else { 0 };
+            
+            base_size + witness_size
+        }).sum::<usize>();
 
         // Write block
-        let block_id = self.id_gen.next_id("blk");
-        writeln!(self.writers.blocks, "{},{},{},{},{},{},{},{},{},{}", 
-            block_id, file_number, block_number, date_str, time_str,
-            hex::encode(block.header.version), 
+        // BLOCK_ID,FILE_ID,BLOCK_HASH,DATE_TIME,VERSION,PREV_BLOCK_HASH,MERKLE_ROOT,BITS,NONCE,BLOCK_SIZE,TX_COUNT
+        writeln!(self.writers.blocks, "{},{},{},{},{},{},{},{},{},{},{}", 
+            block_number, file_number, block_hash, date_time_str,
+            u32::from_le_bytes(block.header.version),
             hex::encode(block.header.prev_hash), 
             hex::encode(block.header.merkle_root), 
-            hex::encode(block.header.bits), 
-            hex::encode(block.header.nonce)
+            u32::from_le_bytes(block.header.bits),
+            u32::from_le_bytes(block.header.nonce),
+            block_size,
+            block.transactions.len()
         )?;
 
         // Write transactions and related data
-        for tx in &block.transactions {
-            writeln!(self.writers.transactions, "{},{},{},{},{}", 
-                tx.id, block_number, tx.txid, tx.version, hex::encode(tx.lock_time))?;
+        for (tx_index, tx) in block.transactions.iter().enumerate() {
+            let is_segwit = tx.witnesses.is_some();
+            let tx_size = if is_segwit {
+                // SegWit transaction size calculation (approximate)
+                let witness_size: usize = tx.witnesses.as_ref().unwrap().iter()
+                    .map(|w| w.data.len() + 1).sum();
+                let base_size = 4 + 1 + tx.inputs.len() * 41 + 1 + 
+                    tx.outputs.iter().map(|out| 8 + 1 + out.script.len()).sum::<usize>() + 4;
+                base_size + witness_size + 2 // +2 for segwit flag
+            } else {
+                4 + 1 + tx.inputs.len() * 41 + 1 + 
+                tx.outputs.iter().map(|out| 8 + 1 + out.script.len()).sum::<usize>() + 4
+            };
 
+            // TRANSACTION_ID,BLOCK_ID,TXID,VERSION,LOCK_TIME,IS_SEGWIT,INPUT_COUNT,OUTPUT_COUNT,TX_SIZE
+            writeln!(self.writers.transactions, "{},{},{},{},{},{},{},{},{}", 
+                tx.id, block_number, tx.txid, tx.version, 
+                u32::from_le_bytes(tx.lock_time),
+                is_segwit,
+                tx.inputs.len(),
+                tx.outputs.len(),
+                tx_size
+            )?;
+
+                    
+            // INPUT_ID,TRANSACTION_ID,INPUT_INDEX,PREV_TXID,PREV_VOUT,SCRIPT_SIG,SEQUENCE_NUMBER
             // Write inputs
-            for input in &tx.inputs {
-                writeln!(self.writers.inputs, "{},{},{},{},{}", 
-                    input.id, tx.txid, input.vout, hex::encode(&input.script), input.sequence)?;
+            for (input_index, input) in tx.inputs.iter().enumerate() {
+                writeln!(self.writers.inputs, "{},{},{},{},{},{},{}", 
+                    input.id, tx.id, input_index, input.txid, input.vout, 
+                    hex::encode(&input.script), input.sequence)?;
             }
-
+        
             // Write outputs
-            for output in &tx.outputs {                
+            for (output_index, output) in tx.outputs.iter().enumerate() {                
                 // Extract and write address if available
                 let mut tx_type = "unknown".to_string();
                 if !output.script.is_empty() {
                     if let Ok((tx_typ, address_opt)) = get_tx_type(&output.script) {
                         tx_type = tx_typ;
                         if let Some(address) = address_opt {
-                            let address_id = self.id_gen.next_id("addr");
-                            writeln!(self.writers.addresses, "{},{},{}", 
-                                address_id, output.id, address)?;
+                            // Get or create address ID
+                            let address_id = if let Some(&existing_id) = self.address_cache.get(&address) {
+                                existing_id
+                            } else {
+                                let new_id = self.id_gen.next_id("addr");                                
+                                let script_hash = hex::encode(&Sha256::digest(&output.script));
+
+                                // ADDRESS_ID,ADDRESS,SCRIPT_TYPE,SCRIPT_HASH
+                                writeln!(self.writers.addresses, "{},{},{},{}", 
+                                    new_id, address, tx_type, script_hash)?;
+                                self.address_cache.insert(address.clone(), new_id);
+                                new_id
+                            };
+
+                            //  OUTPUT_ID,ADDRESS_ID
+                            // Write output-address mapping
+                            writeln!(self.writers.output_addresses, "{},{}", 
+                                output.id, address_id)?;
                         }
                         
                         // Track transaction types
                         *self.tx_types.entry(tx_type.to_string()).or_insert(0) += 1;
                     }
                 }
-                writeln!(self.writers.outputs, "{},{},{},{},{}", 
-                    output.id, tx.txid, output.amount, &tx_type, hex::encode(&output.script))?;
-                
+
+                // OUTPUT_ID,TRANSACTION_ID,OUTPUT_INDEX,VALUE,SCRIPT_PUBKEY,SCRIPT_TYPE
+                writeln!(self.writers.outputs, "{},{},{},{},{},{}", 
+                    output.id, tx.id, output_index, output.amount, 
+                    hex::encode(&output.script), &tx_type)?;
             }
+
+                    
+        // let witnesses = Self::create_csv_file(&format!("{}/witnesses.csv", output_dir), 
+        //     "WITNESS_ID,TRANSACTION_ID,INPUT_ID,INPUT_INDEX,WITNESS_INDEX,WITNESS_DATA,WITNESS_SIZE")?;
 
             // Write witnesses
             if let Some(witnesses) = &tx.witnesses {
                 for witness in witnesses {
-                    writeln!(self.writers.witnesses, "{},{},{}", 
-                        witness.id, witness.index, hex::encode(&witness.data))?;
+                    writeln!(self.writers.witnesses, "{},{},{},{},{},{},{}", 
+                        witness.id, tx.id, witness.txiid, witness.index, 
+                        witness.index, hex::encode(&witness.data), witness.data.len())?;
                 }
             }
         }
@@ -505,10 +583,6 @@ impl BlockParser {
         let start = Instant::now();
         let mut total_blocks = 0;
 
-        println!("Starting block parsing from {} to {}", 
-            file_range.start, file_range.end);
-        //panic!("Debugging block parsing...");
-
         for file_number in file_range.clone() {
             let file_start = Instant::now();
             let file_path = blocks_dir.join(format!("blk{:05}.dat", file_number));
@@ -534,7 +608,7 @@ impl BlockParser {
             }
 
             // Flush periodically
-            if file_number % 2 == 0 {
+            if file_number % 10 == 0 {
                 self.writers.flush_all()?;
             }
         }
@@ -605,10 +679,6 @@ fn main() -> Result<()> {
     println!("File range: {} to {}", start_file, end_file);
     println!("Debug mode: {}", debug);
 
-    if !blocks_dir.exists() {
-        return Err(anyhow::anyhow!("Blocks directory does not exist: {}", blocks_dir.display()));
-    }
-
     let mut parser = BlockParser::new(&output_dir, debug)?;
     parser.run(&blocks_dir, start_file..end_file)?; // Fixed: Pass &Path
 
@@ -618,20 +688,472 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::fs;
+    use tempfile::TempDir;
+    use chrono::{Datelike, Timelike};
+    use hex;
+
+    // Genesis block data (block 0) - well-known constants
+    const GENESIS_BLOCK_HASH: &str = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+    const GENESIS_PREV_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const GENESIS_MERKLE_ROOT: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    const GENESIS_TIMESTAMP: u32 = 1231006505; // 2009-01-03 18:15:05 UTC
+    const GENESIS_BITS: u32 = 0x1d00ffff;
+    const GENESIS_NONCE: u32 = 2083236893;
+    const GENESIS_COINBASE_TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    const GENESIS_COINBASE_OUTPUT_VALUE: u64 = 5000000000; // 50 BTC in satoshis
 
     #[test]
-    fn test_varint_parsing() {
-        // Test small values
-        let data = [42u8, 0, 0, 0, 0, 0, 0, 0, 0];
-        let cursor = std::io::Cursor::new(&data[..1]);
+    fn test_varint_parsing_single_byte() {
+        let data = [42u8];
+        let cursor = Cursor::new(&data[..]);
         let mut reader = BufReader::new(cursor);
         let varint = read_varint(&mut reader).unwrap();
+        
         assert_eq!(varint.value, 42);
         assert_eq!(varint.len, 1);
+        assert_eq!(varint.data[0], 42);
+    }
+
+    #[test]
+    fn test_varint_parsing_two_bytes() {
+        let data = [253u8, 0xfd, 0x00]; // 253 in little endian
+        let cursor = Cursor::new(&data[..]);
+        let mut reader = BufReader::new(cursor);
+        let varint = read_varint(&mut reader).unwrap();
+        
+        assert_eq!(varint.value, 253);
+        assert_eq!(varint.len, 3);
+    }
+
+    #[test]
+    fn test_varint_parsing_four_bytes() {
+        let data = [254u8, 0x01, 0x00, 0x01, 0x00]; // 65537 in little endian
+        let cursor = Cursor::new(&data[..]);
+        let mut reader = BufReader::new(cursor);
+        let varint = read_varint(&mut reader).unwrap();
+        
+        assert_eq!(varint.value, 65537);
+        assert_eq!(varint.len, 5);
+    }
+
+    #[test]
+    fn test_varint_parsing_eight_bytes() {
+        let data = [255u8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // 1 in 8 bytes
+        let cursor = Cursor::new(&data[..]);
+        let mut reader = BufReader::new(cursor);
+        let varint = read_varint(&mut reader).unwrap();
+        
+        assert_eq!(varint.value, 1);
+        assert_eq!(varint.len, 9);
     }
 
     #[test]
     fn test_magic_constant() {
         assert_eq!(MAGIC, 0xD9B4BEF9);
+        assert_eq!(MAGIC, 3652501241); // Decimal equivalent
+    }
+
+    #[test]
+    fn test_id_generator() {
+        let mut id_gen = IdGenerator::new();
+        
+        assert_eq!(id_gen.next_id("test"), 1);
+        assert_eq!(id_gen.next_id("test"), 2);
+        assert_eq!(id_gen.next_id("test"), 3);
+        
+        assert_eq!(id_gen.next_id("other"), 1);
+        assert_eq!(id_gen.next_id("other"), 2);
+        
+        assert_eq!(id_gen.next_id("test"), 4);
+    }
+
+    #[test]
+    fn test_csv_writers_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        
+        let writers = CsvWriters::new(output_dir);
+        assert!(writers.is_ok());
+        
+        // Check that all CSV files were created
+        assert!(temp_dir.path().join("blocks.csv").exists());
+        assert!(temp_dir.path().join("transactions.csv").exists());
+        assert!(temp_dir.path().join("inputs.csv").exists());
+        assert!(temp_dir.path().join("outputs.csv").exists());
+        assert!(temp_dir.path().join("witnesses.csv").exists());
+        assert!(temp_dir.path().join("addresses.csv").exists());
+        assert!(temp_dir.path().join("output_addresses.csv").exists());
+    }
+
+    #[test]
+    fn test_csv_headers() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        
+        let mut writers = CsvWriters::new(output_dir).unwrap();
+        writers.flush_all().unwrap();
+        
+        // Check headers
+        let blocks_content = fs::read_to_string(temp_dir.path().join("blocks.csv")).unwrap();
+        assert!(blocks_content.starts_with("ID,FILE_NUMBER,BLOCK_NUMBER,BLOCK_HASH,DATE_TIME,VERSION,PREV_BLOCK_HASH,MERKLE_ROOT,BITS,NONCE,BLOCK_SIZE,TX_COUNT"));
+        
+        let transactions_content = fs::read_to_string(temp_dir.path().join("transactions.csv")).unwrap();
+        assert!(transactions_content.starts_with("ID,BLOCK_ID,TXID,VERSION,LOCK_TIME,IS_SEGWIT,INPUT_COUNT,OUTPUT_COUNT,TX_SIZE"));
+        
+        let witnesses_content = fs::read_to_string(temp_dir.path().join("witnesses.csv")).unwrap();
+        assert!(witnesses_content.starts_with("ID,TRANSACTION_ID,INPUT_ID,INPUT_INDEX,WITNESS_INDEX,WITNESS_DATA,WITNESS_SIZE"));
+    }
+
+    // Create a mock genesis block for testing
+    fn create_mock_genesis_block() -> Vec<u8> {
+        let mut block_data = Vec::new();
+        
+        // Magic number
+        block_data.extend_from_slice(&MAGIC.to_le_bytes());
+        
+        // Block size (we'll update this later)
+        let size_placeholder = block_data.len();
+        block_data.extend_from_slice(&[0u8; 4]);
+        
+        // Block header (80 bytes)
+        block_data.extend_from_slice(&1u32.to_le_bytes()); // version
+        block_data.extend_from_slice(&hex::decode(GENESIS_PREV_HASH).unwrap()); // prev_hash (32 bytes of zeros)
+        block_data.extend_from_slice(&hex::decode(GENESIS_MERKLE_ROOT).unwrap()); // merkle_root
+        block_data.extend_from_slice(&GENESIS_TIMESTAMP.to_le_bytes()); // timestamp
+        block_data.extend_from_slice(&GENESIS_BITS.to_le_bytes()); // bits
+        block_data.extend_from_slice(&GENESIS_NONCE.to_le_bytes()); // nonce
+        
+        // Transaction count (1 transaction)
+        block_data.push(1u8);
+        
+        // Genesis transaction
+        block_data.extend_from_slice(&1u32.to_le_bytes()); // version
+        
+        // Input count (1)
+        block_data.push(1u8);
+        
+        // Input
+        block_data.extend_from_slice(&[0u8; 32]); // prev_txid (null)
+        block_data.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // prev_vout (0xFFFFFFFF for coinbase)
+        
+        // Script length and script (Genesis coinbase script)
+        let coinbase_script = hex::decode("04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73").unwrap();
+        block_data.push(coinbase_script.len() as u8);
+        block_data.extend_from_slice(&coinbase_script);
+        
+        block_data.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // sequence
+        
+        // Output count (1)
+        block_data.push(1u8);
+        
+        // Output
+        block_data.extend_from_slice(&GENESIS_COINBASE_OUTPUT_VALUE.to_le_bytes()); // value
+        
+        // Output script
+        let output_script = hex::decode("4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac").unwrap();
+        block_data.push(output_script.len() as u8);
+        block_data.extend_from_slice(&output_script);
+        
+        // Lock time
+        block_data.extend_from_slice(&0u32.to_le_bytes());
+        
+        // Update block size
+        let total_size = (block_data.len() - 8) as u32; // Exclude magic and size field
+        block_data[size_placeholder..size_placeholder + 4].copy_from_slice(&total_size.to_le_bytes());
+        
+        block_data
+    }
+
+    #[test]
+    fn test_genesis_block_parsing() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        
+        let mut parser = BlockParser::new(output_dir, true).unwrap();
+        let genesis_data = create_mock_genesis_block();
+        
+        // Create a temporary file with genesis block data
+        let file_path = temp_dir.path().join("blk00000.dat");
+        fs::write(&file_path, &genesis_data).unwrap();
+        
+        let result = parser.parse_block_file(&file_path, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1); // Should parse 1 block
+        
+        parser.writers.flush_all().unwrap();
+        
+        // Verify blocks.csv
+        let blocks_csv = fs::read_to_string(temp_dir.path().join("blocks.csv")).unwrap();
+        let lines: Vec<&str> = blocks_csv.lines().collect();
+        assert_eq!(lines.len(), 2); // Header + 1 block
+        
+        let block_line = lines[1];
+        assert!(block_line.contains("2009-01-03 18:15:05")); // Genesis timestamp
+        assert!(block_line.contains(&GENESIS_PREV_HASH)); // Previous hash
+        assert!(block_line.contains(&GENESIS_MERKLE_ROOT)); // Merkle root
+        
+        // Verify transactions.csv
+        let transactions_csv = fs::read_to_string(temp_dir.path().join("transactions.csv")).unwrap();
+        let tx_lines: Vec<&str> = transactions_csv.lines().collect();
+        assert_eq!(tx_lines.len(), 2); // Header + 1 transaction
+        
+        let tx_line = tx_lines[1];
+        assert!(tx_line.contains("false")); // Not SegWit
+        assert!(tx_line.contains(",1,1,")); // 1 input, 1 output
+    }
+
+    #[test]
+    fn test_header_parsing() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Create header data
+        let mut header_data = Vec::new();
+        header_data.extend_from_slice(&1u32.to_le_bytes()); // version
+        header_data.extend_from_slice(&[0u8; 32]); // prev_hash
+        header_data.extend_from_slice(&hex::decode(GENESIS_MERKLE_ROOT).unwrap()); // merkle_root
+        header_data.extend_from_slice(&GENESIS_TIMESTAMP.to_le_bytes()); // time
+        header_data.extend_from_slice(&GENESIS_BITS.to_le_bytes()); // bits
+        header_data.extend_from_slice(&GENESIS_NONCE.to_le_bytes()); // nonce
+        
+        let cursor = Cursor::new(header_data);
+        let mut reader = BufReader::new(cursor);
+        
+        let header = parser.parse_header(&mut reader).unwrap();
+        
+        assert_eq!(u32::from_le_bytes(header.version), 1);
+        assert_eq!(header.prev_hash, [0u8; 32]);
+        assert_eq!(hex::encode(header.merkle_root), GENESIS_MERKLE_ROOT);
+        assert_eq!(u32::from_le_bytes(header.time), GENESIS_TIMESTAMP);
+        assert_eq!(u32::from_le_bytes(header.bits), GENESIS_BITS);
+        assert_eq!(u32::from_le_bytes(header.nonce), GENESIS_NONCE);
+    }
+
+    #[test]
+    fn test_coinbase_input_parsing() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Create coinbase input data
+        let mut input_data = Vec::new();
+        input_data.extend_from_slice(&[0u8; 32]); // prev_txid (null for coinbase)
+        input_data.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // prev_vout
+        
+        let coinbase_script = hex::decode("04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73").unwrap();
+        input_data.push(coinbase_script.len() as u8); // script length
+        input_data.extend_from_slice(&coinbase_script); // script
+        input_data.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // sequence
+        
+        let cursor = Cursor::new(input_data);
+        let mut reader = BufReader::new(cursor);
+        let mut hasher = Sha256::new();
+        
+        let input = parser.parse_input(&mut reader, &mut hasher).unwrap();
+        
+        assert_eq!(input.txid, "0000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(input.vout, 0xFFFFFFFF);
+        assert_eq!(input.script, coinbase_script);
+        assert_eq!(input.sequence, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_genesis_output_parsing() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Create genesis output data
+        let mut output_data = Vec::new();
+        output_data.extend_from_slice(&GENESIS_COINBASE_OUTPUT_VALUE.to_le_bytes()); // value
+        
+        let output_script = hex::decode("4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac").unwrap();
+        output_data.push(output_script.len() as u8); // script length
+        output_data.extend_from_slice(&output_script); // script
+        
+        let cursor = Cursor::new(output_data);
+        let mut reader = BufReader::new(cursor);
+        let mut hasher = Sha256::new();
+        
+        let output = parser.parse_output(&mut reader, &mut hasher).unwrap();
+        
+        assert_eq!(output.amount, GENESIS_COINBASE_OUTPUT_VALUE);
+        assert_eq!(output.script, output_script);
+    }
+
+    #[test]
+    fn test_no_witnesses_in_genesis() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Genesis block has no witnesses (pre-SegWit)
+        let inputs = vec![Input {
+            id: 1,
+            txid: "test".to_string(),
+            vout: 0,
+            script: vec![],
+            sequence: 0,
+        }];
+        
+        // This should not panic or fail
+        let witnesses = parser.parse_witnesses(&mut BufReader::new(Cursor::new(vec![0u8])), &inputs);
+        assert!(witnesses.is_ok());
+        let witness_data = witnesses.unwrap();
+        assert_eq!(witness_data.len(), 0); // No witnesses for the single input
+    }
+
+    #[test]
+    fn test_block_timestamp_conversion() {
+        let timestamp = GENESIS_TIMESTAMP as i64;
+        let datetime = Utc.timestamp_opt(timestamp, 0).single().unwrap();
+        
+        assert_eq!(datetime.year(), 2009);
+        assert_eq!(datetime.month(), 1);
+        assert_eq!(datetime.day(), 3);
+        assert_eq!(datetime.hour(), 18);
+        assert_eq!(datetime.minute(), 15);
+        assert_eq!(datetime.second(), 5);
+    }
+
+    #[test]
+    fn test_hex_encoding_decoding() {
+        let test_data = vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+        let hex_string = hex::encode(&test_data);
+        assert_eq!(hex_string, "0123456789abcdef");
+        
+        let decoded = hex::decode(&hex_string).unwrap();
+        assert_eq!(decoded, test_data);
+    }
+
+    #[test]
+    fn test_little_endian_conversion() {
+        let value = 0x12345678u32;
+        let bytes = value.to_le_bytes();
+        assert_eq!(bytes, [0x78, 0x56, 0x34, 0x12]);
+        
+        let recovered = u32::from_le_bytes(bytes);
+        assert_eq!(recovered, value);
+    }
+
+    #[test]
+    fn test_address_cache() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Test address caching
+        parser.address_cache.insert("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".to_string(), 1);
+        
+        assert_eq!(parser.address_cache.get("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"), Some(&1));
+        assert_eq!(parser.address_cache.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_transaction_type_tracking() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Simulate transaction type tracking
+        *parser.tx_types.entry("p2pkh".to_string()).or_insert(0) += 1;
+        *parser.tx_types.entry("p2sh".to_string()).or_insert(0) += 1;
+        *parser.tx_types.entry("p2pkh".to_string()).or_insert(0) += 1;
+        
+        assert_eq!(parser.tx_types.get("p2pkh"), Some(&2));
+        assert_eq!(parser.tx_types.get("p2sh"), Some(&1));
+        assert_eq!(parser.tx_types.get("unknown"), None);
+    }
+
+    #[test]
+    fn test_buffer_size_constant() {
+        assert_eq!(BUFFER_SIZE, 8 * 1024 * 1024);
+        assert_eq!(BUFFER_SIZE, 8388608);
+    }
+
+    #[test]
+    fn test_invalid_magic_number() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Create data with invalid magic number
+        let mut invalid_data = Vec::new();
+        invalid_data.extend_from_slice(&0x12345678u32.to_le_bytes()); // Wrong magic
+        invalid_data.extend_from_slice(&100u32.to_le_bytes()); // Size
+        invalid_data.extend_from_slice(&vec![0u8; 100]); // Dummy data
+        
+        let file_path = temp_dir.path().join("invalid.dat");
+        fs::write(&file_path, &invalid_data).unwrap();
+        
+        let result = parser.parse_block_file(&file_path, 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid magic number"));
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Create empty file
+        let file_path = temp_dir.path().join("empty.dat");
+        fs::write(&file_path, &Vec::<u8>::new()).unwrap();
+        
+        let result = parser.parse_block_file(&file_path, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0); // No blocks parsed
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        let file_path = temp_dir.path().join("nonexistent.dat");
+        
+        let result = parser.parse_block_file(&file_path, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_debug_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        
+        let parser_debug = BlockParser::new(output_dir, true).unwrap();
+        assert_eq!(parser_debug.debug, true);
+        
+        let parser_no_debug = BlockParser::new(output_dir, false).unwrap();
+        assert_eq!(parser_no_debug.debug, false);
+    }
+
+    #[test]
+    fn test_file_range_processing() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().to_str().unwrap();
+        let blocks_dir = temp_dir.path().join("blocks");
+        fs::create_dir_all(&blocks_dir).unwrap();
+        
+        let mut parser = BlockParser::new(output_dir, false).unwrap();
+        
+        // Test with non-existent files
+        let result = parser.run(&blocks_dir, 0..5);
+        assert!(result.is_ok()); // Should succeed even with no files
+    }
+
+    #[test]
+    fn test_path_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let blocks_dir = temp_dir.path().join("blocks");
+        
+        let file_path = blocks_dir.join("blk00000.dat");
+        assert_eq!(file_path.file_name().unwrap(), "blk00000.dat");
+        assert_eq!(file_path.parent().unwrap(), blocks_dir);
     }
 }
