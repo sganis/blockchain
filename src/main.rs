@@ -9,14 +9,14 @@ use sha2::{Sha256, Digest};
 use chrono::prelude::{TimeZone, Utc};
 use std::{
     fs::File, 
-    io::{BufReader, Write, Read, BufWriter, Seek, SeekFrom},
+    io::{BufReader, Write, Read, BufWriter},
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use opcodes::script_to_opcodes;
 use transaction::get_tx_type;
 
-const MAGIC: u32 = 3_652_501_241; // FEBEB4D9
+const MAGIC: u32 = 0xD9B4BEF9; // Fixed: Use proper hex representation
 const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer
 
 #[derive(Debug, Clone)]
@@ -101,7 +101,7 @@ struct Input {
     id: u64,
     txid: String,
     vout: u32,
-    script: Vec<u8>, // Store raw bytes instead of hex string
+    script: Vec<u8>,
     sequence: u32,
 }
 
@@ -109,7 +109,7 @@ struct Input {
 struct Output {
     id: u64,
     amount: u64,
-    script: Vec<u8>, // Store raw bytes instead of hex string
+    script: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -117,7 +117,7 @@ struct Witness {
     id: u64,
     txiid: u64,
     index: usize,
-    data: Vec<u8>, // Store raw bytes instead of hex string
+    data: Vec<u8>,
 }
 
 pub struct IdGenerator {
@@ -386,7 +386,8 @@ impl BlockParser {
 
     fn write_block_data(&mut self, block: &Block, file_number: u32, block_number: u32) -> Result<()> {
         let timestamp = u32::from_le_bytes(block.header.time) as i64;
-        let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
+        let datetime = Utc.timestamp_opt(timestamp, 0).single().unwrap(); // Fixed: Use single() instead of unwrap()
+
         let date_str = datetime.format("%Y-%m-%d");
         let time_str = datetime.format("%H:%M:%S");
 
@@ -480,14 +481,14 @@ impl BlockParser {
 
             let block = Block { header, transactions };
             
-            // if self.debug {
-            //     let timestamp = u32::from_le_bytes(block.header.time) as i64;
-            //     let datetime = Utc.timestamp_opt(timestamp, 0).unwrap();
-            //     println!("FILE {} BLOCK {} {} {}", 
-            //         file_number, block_count, 
-            //         datetime.format("%Y-%m-%d"), 
-            //         datetime.format("%H:%M:%S"));
-            // }
+            if self.debug {
+                let timestamp = u32::from_le_bytes(block.header.time) as i64;
+                let datetime = Utc.timestamp_opt(timestamp, 0).single().unwrap(); // Fixed: Use single()
+                println!("FILE {} BLOCK {} {} {}", 
+                    file_number, block_count, 
+                    datetime.format("%Y-%m-%d"), 
+                    datetime.format("%H:%M:%S"));
+            }
 
             self.write_block_data(&block, file_number, block_count)?;
             block_count += 1;
@@ -500,13 +501,17 @@ impl BlockParser {
         Ok(block_count)
     }
 
-    fn run(&mut self, blocks_dir: &str, file_range: std::ops::Range<u32>) -> Result<()> {
+    fn run(&mut self, blocks_dir: &Path, file_range: std::ops::Range<u32>) -> Result<()> { // Fixed: Accept &Path
         let start = Instant::now();
         let mut total_blocks = 0;
 
+        println!("Starting block parsing from {} to {}", 
+            file_range.start, file_range.end);
+        //panic!("Debugging block parsing...");
+
         for file_number in file_range.clone() {
             let file_start = Instant::now();
-            let file_path = Path::new(blocks_dir).join(format!("blk{:05}.dat", file_number));
+            let file_path = blocks_dir.join(format!("blk{:05}.dat", file_number));
             
             if !file_path.exists() {
                 if self.debug {
@@ -529,7 +534,7 @@ impl BlockParser {
             }
 
             // Flush periodically
-            if file_number % 10 == 0 {
+            if file_number % 2 == 0 {
                 self.writers.flush_all()?;
             }
         }
@@ -561,22 +566,28 @@ impl BlockParser {
     }
 }
 
-
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
-    //let root = "data";
-    let root = "F:/btc";
-    let blocks_path = &format!("{}/blocks", &root);
-    let csv_path = &format!("{}/../csv", &root);
+    // Platform detection
+    let root = if cfg!(windows) {
+        PathBuf::from("F:/btc")
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("data/btc")
+    };
+
+    let blocks_path = root.join("blocks"); // Fixed: Use PathBuf::join
+    let csv_path = root.parent().unwrap().join("csv"); // Fixed: Navigate properly
 
     let blocks_dir = args.get(1)
-        .map(|s| s.as_str())
+        .map(|s| PathBuf::from(s)) // Fixed: Convert to PathBuf
         .unwrap_or(blocks_path);
 
     let output_dir = args.get(2)
-        .map(|s| s.as_str())
-        .unwrap_or(csv_path);
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| csv_path.to_string_lossy().to_string()); // Fixed: Convert PathBuf to String
 
     let start_file: u32 = args.get(3)
         .and_then(|s| s.parse().ok())
@@ -586,19 +597,20 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
     
-    //let debug = args.contains(&"--debug".to_string());
     let debug = true;
-    // let start_file = 976;
-    // let end_file = 977;
 
     println!("Bitcoin Block Parser");
-    println!("Blocks directory: {}", blocks_dir);
+    println!("Blocks directory: {}", blocks_dir.display()); // Fixed: Use display()
     println!("Output directory: {}", output_dir);
     println!("File range: {} to {}", start_file, end_file);
     println!("Debug mode: {}", debug);
 
-    let mut parser = BlockParser::new(output_dir, debug)?;
-    parser.run(blocks_dir, start_file..end_file)?;
+    if !blocks_dir.exists() {
+        return Err(anyhow::anyhow!("Blocks directory does not exist: {}", blocks_dir.display()));
+    }
+
+    let mut parser = BlockParser::new(&output_dir, debug)?;
+    parser.run(&blocks_dir, start_file..end_file)?; // Fixed: Pass &Path
 
     Ok(())
 }
@@ -611,7 +623,7 @@ mod tests {
     fn test_varint_parsing() {
         // Test small values
         let data = [42u8, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut cursor = std::io::Cursor::new(&data[..1]);
+        let cursor = std::io::Cursor::new(&data[..1]);
         let mut reader = BufReader::new(cursor);
         let varint = read_varint(&mut reader).unwrap();
         assert_eq!(varint.value, 42);
