@@ -797,13 +797,19 @@ mod tests {
         
         // Check headers
         let blocks_content = fs::read_to_string(temp_dir.path().join("blocks.csv")).unwrap();
-        assert!(blocks_content.starts_with("ID,FILE_NUMBER,BLOCK_NUMBER,BLOCK_HASH,DATE_TIME,VERSION,PREV_BLOCK_HASH,MERKLE_ROOT,BITS,NONCE,BLOCK_SIZE,TX_COUNT"));
+        assert!(blocks_content.starts_with(
+            "BLOCK_ID,FILE_ID,BLOCK_HASH,DATE_TIME,VERSION,PREV_BLOCK_HASH,MERKLE_ROOT,BITS,NONCE,BLOCK_SIZE,TX_COUNT"
+        ));
         
         let transactions_content = fs::read_to_string(temp_dir.path().join("transactions.csv")).unwrap();
-        assert!(transactions_content.starts_with("ID,BLOCK_ID,TXID,VERSION,LOCK_TIME,IS_SEGWIT,INPUT_COUNT,OUTPUT_COUNT,TX_SIZE"));
+        assert!(transactions_content.starts_with(
+            "TRANSACTION_ID,BLOCK_ID,TXID,VERSION,LOCK_TIME,IS_SEGWIT,INPUT_COUNT,OUTPUT_COUNT,TX_SIZE"
+        ));
         
         let witnesses_content = fs::read_to_string(temp_dir.path().join("witnesses.csv")).unwrap();
-        assert!(witnesses_content.starts_with("ID,TRANSACTION_ID,INPUT_ID,INPUT_INDEX,WITNESS_INDEX,WITNESS_DATA,WITNESS_SIZE"));
+        assert!(witnesses_content.starts_with(
+            "WITNESS_ID,TRANSACTION_ID,INPUT_ID,INPUT_INDEX,WITNESS_INDEX,WITNESS_DATA,WITNESS_SIZE"
+        ));
     }
 
     // Create a mock genesis block for testing

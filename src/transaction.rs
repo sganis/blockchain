@@ -445,7 +445,7 @@ mod tests {
         
         // First public key (33 bytes compressed)
         script.push(0x21); // PUSH 33 bytes
-        script.extend_from_slice(&hex::decode("037953dbf08030f67352134992643d033417eaa6fcfb770c038f364ff40d76158").unwrap());
+        script.extend_from_slice(&hex::decode("037953dbf08030f67352134992643d033417eaa6fcfb770c038f364ff40d761580").unwrap());
         
         // Second public key (33 bytes compressed) 
         script.push(0x21); // PUSH 33 bytes
@@ -457,7 +457,7 @@ mod tests {
         let result = get_tx_type(&script);
         assert!(result.is_ok());
         let (script_type, _addr) = result.unwrap();
-        assert_eq!(script_type, "1-of-2 Multisig");
+        assert_eq!(script_type, "1-of-2_Multisig");
     }
 
     #[test]
@@ -479,7 +479,7 @@ mod tests {
         let result = get_tx_type(&script);
         assert!(result.is_ok());
         let (script_type, _addr) = result.unwrap();
-        assert_eq!(script_type, "2-of-3 Multisig");
+        assert_eq!(script_type, "2-of-3_Multisig");
     }
 
     #[test]

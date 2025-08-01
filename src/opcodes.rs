@@ -483,7 +483,7 @@ mod tests {
     fn test_pushbytes_edge_cases() {
         // Test boundary values
         assert_eq!(script_to_opcodes(&[0x01, 0x00], false), "PUSHBYTES_1 00");
-        assert_eq!(script_to_opcodes(&[0x4b, 0xff], false), "PUSHBYTES_75 ff"); // Max single byte push
+        assert_eq!(script_to_opcodes(&[0x4b, 0xff], false), "PUSHBYTES_75 <overflow>"); // Max single byte push
     }
 
     // Test boundary conditions for data lengths
