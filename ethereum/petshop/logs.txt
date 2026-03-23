@@ -1,0 +1,11 @@
+commit 2feee667e07865b3c3e92dd4fc18109234884231
+Author: San <sganis@gmail.com>
+Date:   Wed Jul 21 12:56:17 2021 +0300
+
+    Adopt app completed
+
+commit f9c2e05ee372556639fb060a4ad0949633be34b6
+Author: San <sganis@gmail.com>
+Date:   Wed Jul 21 11:43:06 2021 +0300
+
+    Fist commit

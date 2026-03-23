@@ -1,0 +1,4 @@
+pick f9c2e05 Fist commit
+exec git commit --amend --no-edit --date "Wed Jul 21 11:43:06 2017 +0300"
+pick 2feee66 Adopt app completed
+exec git commit --amend --no-edit --date "Wed Jul 21 12:56:17 2017 +0300"

@@ -1,0 +1,83 @@
+
+C:\Users\San\AppData\Local\Programs\zap-desktop\resources\resources\bin\lnd.exe --debuglevel=debug --bitcoin.active --lnddir=C:\Users\San\AppData\Roaming\Zap\lnd\bitcoin\mainnet\wallet-3 --rpclisten=localhost:11009 --listen=0 --restlisten=localhost:8180 --accept-keysend --routing.assumechanvalid "" --bitcoin.node=neutrino --neutrino.useragentname=zap-desktop --neutrino.useragentversion=0.7.2-beta --bitcoin.mainnet --neutrino.addpeer=mainnet3-btcd.zaphq.io --neutrino.addpeer=mainnet4-btcd.zaphq.io
+
+
+C:\Dev\lnw>lncli --rpcserver=localhost:11009 	--tlscertpath=C:\Users\San\AppData\Roaming\Zap\lnd\bitcoin\mainnet\wallet-3\tls.cert 	--macaroonpath=C:\Users\San\AppData\Roaming\Zap\lnd\bitcoin\mainnet\wallet-3\data\chain\bitcoin\mainnet\admin.macaroon 	--lnddir=C:\Users\San\AppData\Roaming\Zap\lnd\bitcoin\mainnet\wallet-3 	listpeers 
+{
+    "peers": [
+        {
+            "pub_key": "02fe153690061fa27049bae0faa236ddb95df98c514416a350449c24a8018851dc",
+            "address": "172.81.176.170:9735",
+            "bytes_sent": "24275",
+            "bytes_recv": "3560531",
+            "sat_sent": "0",
+            "sat_recv": "0",
+            "inbound": false,
+            "ping_time": "0",
+            "sync_type": "PASSIVE_SYNC",
+            "features": {
+                "1": {
+                    "name": "data-loss-protect",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "5": {
+                    "name": "upfront-shutdown-script",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "7": {
+                    "name": "gossip-queries",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "9": {
+                    "name": "tlv-onion",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "11": {
+                    "name": "unknown",
+                    "is_required": false,
+                    "is_known": false
+                },
+                "13": {
+                    "name": "static-remote-key",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "14": {
+                    "name": "payment-addr",
+                    "is_required": true,
+                    "is_known": true
+                },
+                "17": {
+                    "name": "multi-path-payments",
+                    "is_required": false,
+                    "is_known": true
+                },
+                "27": {
+                    "name": "unknown",
+                    "is_required": false,
+                    "is_known": false
+                }
+            },
+            "errors": [
+            ],
+            "flap_count": 0,
+            "last_flap_ns": "0",
+            "last_ping_payload": null
+        }
+    ]
+}
+
+
+payment request:
+
+lnbc100u1p349qpkpp5t4jk60uydpm6vx67gktvus3yqp84xmnat9rx88tqm2pn4j09wzfsdqqcqzpgxqrrsssp5wtqpxy84d4pr7ykwy7835fvylr3g92fwhtwrwdxh3eusxsg0pv7q9qy9qsqxrutlfj78qlmjx8ju6djjld70e69sglmjuttk743h0859l8n2sd9penvny5u0vfcucdwzry4qc5faz03cjsle89jrfns3cvx5hkpjgqpn8yrqj
+
+zap:        03634bda49c9c42afd876d8288802942c49e58fbec3844ff54b46143bfcb6cdfaf@157.230.144.234
+yalls:      03e50492eab4107a773141bb419e107bda3de3d55652e6e1a41225f06a0bbf2d56@3.13.48.80
+bitrefill:  030c3f19d742ca294a55c00376b3b355c3c90d61c6b6b39554dbc7ac19b141c14f@52.50.244.44
+tipme:      03c2abfa93eacec04721c019644584424aab2ba4dff3ac9bdab4e9c97007491dda@104.248.84.249
+open node:  03abf6f44c355dec0d5aa155bdbdd6e0c8fefe318eff402de65c6eb2e1be55dc3e@18.221.23.28
