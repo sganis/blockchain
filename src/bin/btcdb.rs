@@ -20,6 +20,10 @@ fn default_analytics() -> String {
     if cfg!(windows) { "F:/csv/analytics".into() } else { "data/csv/analytics".into() }
 }
 
+fn default_p2pk() -> String {
+    if cfg!(windows) { "F:/csv/analytics/p2pk.csv".into() } else { "data/csv/analytics/p2pk.csv".into() }
+}
+
 #[derive(Parser)]
 #[command(name = "btcdb", about = "Bitcoin blockchain SQLite database & analytics")]
 struct Cli {
@@ -63,6 +67,15 @@ enum Command {
         #[arg(long, default_value_t = 1000)]
         range: u64,
     },
+    /// List unspent P2PK outputs with exposed public keys, sorted by balance
+    P2pk {
+        /// Output CSV path
+        #[arg(long, default_value_t = default_p2pk())]
+        output: String,
+        /// Max results
+        #[arg(long, default_value_t = 500)]
+        limit: u32,
+    },
     /// Query balance of a specific address
     Balance {
         /// Bitcoin address to query
@@ -100,6 +113,10 @@ fn main() -> Result<()> {
         Command::Dormant { output, range } => {
             let conn = db::open(&cli.db)?;
             db::dormant(&conn, range, &output)?;
+        }
+        Command::P2pk { output, limit } => {
+            let conn = db::open(&cli.db)?;
+            db::p2pk_balance(&conn, &output, limit)?;
         }
         Command::Balance { address } => {
             let conn = db::open(&cli.db)?;

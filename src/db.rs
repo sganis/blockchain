@@ -494,6 +494,52 @@ pub fn dormant(conn: &Connection, range_size: u64, output_dir: &str) -> Result<(
     Ok(())
 }
 
+pub fn p2pk_balance(conn: &Connection, output_path: &str, limit: u32) -> Result<()> {
+    let start = Instant::now();
+    // P2PK scriptPubKey: <len_byte><pubkey>OP_CHECKSIG(ac)
+    // Hex: "41" + 130 chars + "ac" (uncompressed) or "21" + 66 chars + "ac" (compressed)
+    // SUBSTR(hex, 3, len-4) extracts the raw public key
+    let mut stmt = conn.prepare("
+        SELECT SUBSTR(o.script_pubkey, 3, LENGTH(o.script_pubkey) - 4),
+               CASE WHEN LENGTH(o.script_pubkey) > 70 THEN 'uncompressed' ELSE 'compressed' END,
+               COUNT(*), SUM(ul.value), MIN(ul.created_height),
+               COALESCE(MIN(a.address), '')
+        FROM utxo_lifecycle ul
+        JOIN outputs o ON ul.output_id = o.output_id
+        LEFT JOIN output_addresses oa ON o.output_id = oa.output_id
+        LEFT JOIN addresses a ON oa.address_id = a.address_id
+        WHERE o.script_type LIKE 'P2PK%' AND o.script_type NOT LIKE 'P2PKH%'
+          AND ul.spent_height IS NULL
+        GROUP BY 1 ORDER BY 4 DESC LIMIT ?
+    ")?;
+
+    let mut w = std::io::BufWriter::new(
+        std::fs::File::create(output_path).context("Creating p2pk.csv")?
+    );
+    writeln!(w, "ADDRESS,PUBLIC_KEY,KEY_TYPE,UTXO_COUNT,TOTAL_SATS,TOTAL_BTC,FIRST_BLOCK")?;
+
+    println!("{:<5} {:<36} {:<14} {:>6} {:>18} {:>8}",
+        "#", "Address", "Type", "UTXOs", "BTC", "Block");
+    println!("{}", "-".repeat(91));
+
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, u64>(2)?, row.get::<_, u64>(3)?,
+            row.get::<_, u64>(4)?, row.get::<_, String>(5)?))
+    })?;
+    for (i, row) in rows.enumerate() {
+        let (pk, kt, n, sats, blk, addr) = row?;
+        let btc = sats as f64 / 1e8;
+        writeln!(w, "{},{},{},{},{},{:.8},{}", addr, pk, kt, n, sats, btc, blk)?;
+        let short = if addr.len() > 34 { &addr[..34] } else { &addr };
+        println!("{:<5} {:<36} {:<14} {:>6} {:>18.8} {:>8}",
+            i + 1, short, kt, n, btc, blk);
+    }
+    w.flush()?;
+    println!("\nOutput: {} ({:.1?})", output_path, start.elapsed());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
