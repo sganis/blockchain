@@ -40,7 +40,6 @@ pub struct TxRow {
     pub input_count: u32,
     pub output_count: u32,
     pub tx_size: u64,
-    pub fee: u64,
 }
 
 #[derive(Debug, Deserialize)]

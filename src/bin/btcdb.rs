@@ -16,6 +16,10 @@ fn default_output() -> String {
     if cfg!(windows) { "F:/csv/analytics/hodl.csv".into() } else { "data/csv/analytics/hodl.csv".into() }
 }
 
+fn default_analytics() -> String {
+    if cfg!(windows) { "F:/csv/analytics".into() } else { "data/csv/analytics".into() }
+}
+
 #[derive(Parser)]
 #[command(name = "btcdb", about = "Bitcoin blockchain SQLite database & analytics")]
 struct Cli {
@@ -50,6 +54,15 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
+    /// Estimate dormant and probably lost coins
+    Dormant {
+        /// Output directory for CSVs (dormant.csv + lost.csv)
+        #[arg(long, default_value_t = default_analytics())]
+        output: String,
+        /// Block range size for snapshots
+        #[arg(long, default_value_t = 1000)]
+        range: u64,
+    },
     /// Query balance of a specific address
     Balance {
         /// Bitcoin address to query
@@ -83,6 +96,10 @@ fn main() -> Result<()> {
             for (i, (addr, btc)) in list.iter().enumerate() {
                 println!("{:<5} {:<62} {:>15.8}", i + 1, addr, btc);
             }
+        }
+        Command::Dormant { output, range } => {
+            let conn = db::open(&cli.db)?;
+            db::dormant(&conn, range, &output)?;
         }
         Command::Balance { address } => {
             let conn = db::open(&cli.db)?;

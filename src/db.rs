@@ -45,7 +45,7 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             txid TEXT, version INTEGER, lock_time INTEGER,
             is_segwit INTEGER, is_coinbase INTEGER,
             input_count INTEGER, output_count INTEGER,
-            tx_size INTEGER, fee INTEGER
+            tx_size INTEGER
         );
         CREATE TABLE IF NOT EXISTS inputs (
             input_id INTEGER PRIMARY KEY, transaction_id INTEGER,
@@ -138,12 +138,12 @@ fn load_transactions(conn: &Connection, dir: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let mut count = 0u64;
     {
-        let mut stmt = tx.prepare("INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?)")?;
+        let mut stmt = tx.prepare("INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?)")?;
         for result in rdr.deserialize() {
             let r: TxRow = result?;
             stmt.execute(params![r.transaction_id, r.block_id, r.txid, r.version,
                 r.lock_time, r.is_segwit as i32, r.is_coinbase as i32,
-                r.input_count, r.output_count, r.tx_size, r.fee])?;
+                r.input_count, r.output_count, r.tx_size])?;
             count += 1;
             progress("transactions", count);
         }
@@ -364,6 +364,136 @@ pub fn balance(conn: &Connection, address: &str) -> Result<(u64, u64)> {
     }).map_err(Into::into)
 }
 
+pub fn dormant(conn: &Connection, range_size: u64, output_dir: &str) -> Result<()> {
+    let start = Instant::now();
+    println!("Computing dormant coin analysis (range={})...", range_size);
+
+    let max_height: u64 = conn.query_row(
+        "SELECT COALESCE(MAX(block_height), 0) FROM blocks", [], |r| r.get(0)
+    )?;
+
+    // Thresholds in blocks (~52560 blocks/year)
+    const Y5: i64 = 262800;
+    const Y7: i64 = 367920;
+    const Y10: i64 = 525600;
+
+    // --- Time-series: dormancy bands over time ---
+    let ts_path = format!("{}/dormant.csv", output_dir);
+    let mut writer = std::io::BufWriter::new(
+        std::fs::File::create(&ts_path).context("Creating dormant.csv")?
+    );
+    writeln!(writer,
+        "BLOCK_RANGE,DATE_TIME,ACTIVE,DORMANT_5_7Y,DORMANT_7_10Y,DORMANT_10Y_PLUS"
+    )?;
+
+    let mut band_stmt = conn.prepare("
+        SELECT
+            CASE
+                WHEN (?1 - created_height) < ?2 THEN 0
+                WHEN (?1 - created_height) < ?3 THEN 1
+                WHEN (?1 - created_height) < ?4 THEN 2
+                ELSE 3
+            END AS band,
+            COALESCE(SUM(value), 0) AS total_sats
+        FROM utxo_lifecycle
+        WHERE created_height <= ?1 AND (spent_height IS NULL OR spent_height > ?1)
+        GROUP BY band
+    ")?;
+
+    let mut date_stmt = conn.prepare(
+        "SELECT date_time FROM blocks WHERE block_height <= ? ORDER BY block_height DESC LIMIT 1"
+    )?;
+
+    let total = max_height / range_size + 1;
+    let mut snap_count = 0u64;
+
+    for snapshot in (0..=max_height).step_by(range_size as usize) {
+        let date: String = date_stmt.query_row(params![snapshot], |r| r.get(0))
+            .unwrap_or_default();
+
+        let mut bands = [0u64; 4];
+        let rows = band_stmt.query_map(
+            params![snapshot as i64, Y5, Y7, Y10],
+            |row| Ok((row.get::<_, i32>(0)?, row.get::<_, u64>(1)?)),
+        )?;
+        for row in rows {
+            let (band, sats) = row?;
+            if band >= 0 && band < 4 {
+                bands[band as usize] = sats;
+            }
+        }
+
+        writeln!(writer, "{},{},{},{},{},{}",
+            snapshot, date, bands[0], bands[1], bands[2], bands[3])?;
+
+        snap_count += 1;
+        if snap_count % 10 == 0 {
+            print!("\r  Dormant: {}/{}", snap_count, total);
+            let _ = std::io::stdout().flush();
+        }
+    }
+    writer.flush()?;
+    println!("\r  Dormant: {} snapshots ({:.1?})", snap_count, start.elapsed());
+
+    // --- Summary: categorized lost coins at current tip ---
+    let summary_path = format!("{}/lost.csv", output_dir);
+    let mut sw = std::io::BufWriter::new(
+        std::fs::File::create(&summary_path).context("Creating lost.csv")?
+    );
+    writeln!(sw, "CATEGORY,UTXO_COUNT,TOTAL_SATS,TOTAL_BTC")?;
+
+    let threshold_10y = max_height.saturating_sub(Y10 as u64);
+    let threshold_7y = max_height.saturating_sub(Y7 as u64);
+    let threshold_5y = max_height.saturating_sub(Y5 as u64);
+
+    let categories: &[(&str, String)] = &[
+        ("satoshi_coinbase", format!(
+            "SELECT COUNT(*), COALESCE(SUM(ul.value), 0)
+             FROM utxo_lifecycle ul
+             JOIN outputs o ON ul.output_id = o.output_id
+             JOIN transactions t ON o.transaction_id = t.transaction_id
+             WHERE t.is_coinbase = 1 AND ul.created_height BETWEEN 1 AND 20000
+               AND ul.spent_height IS NULL")),
+        ("early_p2pk", format!(
+            "SELECT COUNT(*), COALESCE(SUM(ul.value), 0)
+             FROM utxo_lifecycle ul
+             JOIN outputs o ON ul.output_id = o.output_id
+             WHERE o.script_type LIKE 'P2PK%' AND o.script_type NOT LIKE 'P2PKH%'
+               AND ul.created_height < 100000 AND ul.spent_height IS NULL")),
+        ("dormant_10y_plus", format!(
+            "SELECT COUNT(*), COALESCE(SUM(value), 0) FROM utxo_lifecycle
+             WHERE created_height <= {} AND spent_height IS NULL", threshold_10y)),
+        ("dormant_7_10y", format!(
+            "SELECT COUNT(*), COALESCE(SUM(value), 0) FROM utxo_lifecycle
+             WHERE created_height > {} AND created_height <= {}
+               AND spent_height IS NULL", threshold_10y, threshold_7y)),
+        ("dormant_5_7y", format!(
+            "SELECT COUNT(*), COALESCE(SUM(value), 0) FROM utxo_lifecycle
+             WHERE created_height > {} AND created_height <= {}
+               AND spent_height IS NULL", threshold_7y, threshold_5y)),
+        ("dust", format!(
+            "SELECT COUNT(*), COALESCE(SUM(value), 0) FROM utxo_lifecycle
+             WHERE value < 546 AND spent_height IS NULL")),
+    ];
+
+    println!("\n{:<25} {:>12} {:>18}", "Category", "UTXOs", "BTC");
+    println!("{}", "-".repeat(57));
+
+    for (name, sql) in categories {
+        let (count, sats): (u64, u64) = conn.query_row(sql, [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        let btc = sats as f64 / 1e8;
+        writeln!(sw, "{},{},{},{:.8}", name, count, sats, btc)?;
+        println!("{:<25} {:>12} {:>18.8}", name, count, btc);
+    }
+    sw.flush()?;
+
+    println!("\nOutput: {}", ts_path);
+    println!("Output: {}", summary_path);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,8 +519,8 @@ mod tests {
         conn.execute_batch("
             INSERT INTO blocks VALUES (0,0,'h0','2009-01-03 18:15:05',1,'','',0,0,285,1);
             INSERT INTO blocks VALUES (100,0,'h1','2009-01-04 18:15:05',1,'','',0,0,285,1);
-            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,1,100,0);
-            INSERT INTO transactions VALUES (2,100,'tx2',1,0,0,0,1,1,100,0);
+            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,1,100);
+            INSERT INTO transactions VALUES (2,100,'tx2',1,0,0,0,1,1,100);
             INSERT INTO outputs VALUES (1,1,'tx1',0,5000000000,'','P2PKH','');
             INSERT INTO outputs VALUES (2,2,'tx2',0,4999900000,'','P2PKH','');
             INSERT INTO inputs VALUES (1,2,'tx2',0,'tx1',0,'',0);
@@ -419,7 +549,7 @@ mod tests {
         let conn = memory_db();
         conn.execute_batch("
             INSERT INTO blocks VALUES (0,0,'h','2009-01-03',1,'','',0,0,0,1);
-            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100,0);
+            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100);
             INSERT INTO outputs VALUES (1,1,'tx1',0,5000000000,'','P2PKH','');
             INSERT INTO outputs VALUES (2,1,'tx1',1,2500000000,'','P2PKH','');
             INSERT INTO addresses VALUES (1,'1ABC','P2PKH','hash1');
@@ -438,8 +568,8 @@ mod tests {
         let conn = memory_db();
         conn.execute_batch("
             INSERT INTO blocks VALUES (0,0,'h','2009-01-03',1,'','',0,0,0,1);
-            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100,0);
-            INSERT INTO transactions VALUES (2,0,'tx2',1,0,0,0,1,1,100,0);
+            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100);
+            INSERT INTO transactions VALUES (2,0,'tx2',1,0,0,0,1,1,100);
             INSERT INTO outputs VALUES (1,1,'tx1',0,5000000000,'','P2PKH','');
             INSERT INTO outputs VALUES (2,1,'tx1',1,2500000000,'','P2PKH','');
             INSERT INTO inputs VALUES (1,2,'tx2',0,'tx1',0,'',0);
@@ -455,11 +585,37 @@ mod tests {
     }
 
     #[test]
+    fn test_dormant() {
+        let conn = memory_db();
+        conn.execute_batch("
+            INSERT INTO blocks VALUES (0,0,'h0','2009-01-03 18:15:05',1,'','',0,0,285,1);
+            INSERT INTO blocks VALUES (100,0,'h1','2009-01-04 18:15:05',1,'','',0,0,285,1);
+            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,1,100);
+            INSERT INTO transactions VALUES (2,100,'tx2',1,0,0,0,1,1,100);
+            INSERT INTO outputs VALUES (1,1,'tx1',0,5000000000,'','P2PK','');
+            INSERT INTO outputs VALUES (2,2,'tx2',0,4999900000,'','P2PKH','');
+            INSERT INTO inputs VALUES (1,2,'tx2',0,'tx1',0,'',0);
+        ").unwrap();
+        create_indexes(&conn).unwrap();
+        build_lifecycle(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join("btc_test_dormant");
+        let _ = std::fs::create_dir_all(&dir);
+        dormant(&conn, 100, dir.to_str().unwrap()).unwrap();
+
+        let csv = std::fs::read_to_string(dir.join("dormant.csv")).unwrap();
+        assert!(csv.contains("ACTIVE,DORMANT_5_7Y"));
+        let lost = std::fs::read_to_string(dir.join("lost.csv")).unwrap();
+        assert!(lost.contains("early_p2pk"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_rich_list() {
         let conn = memory_db();
         conn.execute_batch("
             INSERT INTO blocks VALUES (0,0,'h','2009-01-03',1,'','',0,0,0,1);
-            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100,0);
+            INSERT INTO transactions VALUES (1,0,'tx1',1,0,0,1,0,2,100);
             INSERT INTO outputs VALUES (1,1,'tx1',0,5000000000,'','P2PKH','');
             INSERT INTO outputs VALUES (2,1,'tx1',1,2500000000,'','P2PKH','');
             INSERT INTO addresses VALUES (1,'1ABC','P2PKH','h1');

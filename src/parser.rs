@@ -23,7 +23,6 @@ pub struct BlockParser {
     pub address_cache: HashMap<String, u64>,
     pub block_height: u64,
     pub last_file: u32,
-    utxo_values: HashMap<(String, u32), u64>,
     csv_sizes: HashMap<String, u64>,
     append: bool,
 }
@@ -38,7 +37,6 @@ impl BlockParser {
             address_cache: HashMap::new(),
             block_height: 0,
             last_file: 0,
-            utxo_values: HashMap::new(),
             csv_sizes: HashMap::new(),
             append,
         };
@@ -321,31 +319,14 @@ impl BlockParser {
                 && tx.inputs[0].txid == "0000000000000000000000000000000000000000000000000000000000000000"
                 && tx.inputs[0].vout == 0xFFFFFFFF;
 
-            // Calculate fee: sum(input_values) - sum(output_values)
-            let input_total: u64 = if is_coinbase {
-                0
-            } else {
-                tx.inputs.iter()
-                    .filter_map(|inp| self.utxo_values.remove(&(inp.txid.clone(), inp.vout)))
-                    .sum()
-            };
-            let output_total: u64 = tx.outputs.iter().map(|o| o.amount).sum();
-            let fee = if is_coinbase { 0 } else { input_total.saturating_sub(output_total) };
-
-            // Store outputs in UTXO value map for future fee lookups
-            for (idx, output) in tx.outputs.iter().enumerate() {
-                self.utxo_values.insert((tx.txid.clone(), idx as u32), output.amount);
-            }
-
-            writeln!(self.writers.transactions, "{},{},{},{},{},{},{},{},{},{},{}",
+            writeln!(self.writers.transactions, "{},{},{},{},{},{},{},{},{},{}",
                 tx.id, block_height, tx.txid, tx.version,
                 u32::from_le_bytes(tx.lock_time),
                 is_segwit,
                 is_coinbase,
                 tx.inputs.len(),
                 tx.outputs.len(),
-                tx_size,
-                fee
+                tx_size
             )?;
 
             for (input_index, input) in tx.inputs.iter().enumerate() {
